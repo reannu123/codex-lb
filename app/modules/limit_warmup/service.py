@@ -422,10 +422,7 @@ class LimitWarmupService:
             for account in stagger_source
             if _account_is_safe_candidate(account)
             and account.limit_warmup_enabled
-            and (
-                stagger_primary is None
-                or _eligible_stagger_cohort_entry(stagger_primary.get(account.id))
-            )
+            and (stagger_primary is None or _eligible_stagger_cohort_entry(stagger_primary.get(account.id)))
         ]
         now = utcnow()
 
@@ -1020,9 +1017,7 @@ def _staggered_idle_due(
         window_seconds=window_seconds,
         tolerance_seconds=max(_STAGGER_SLOT_GRACE_SECONDS, usage_refresh_interval_seconds * 2),
     )
-    cycle_start = (
-        now_epoch - now_epoch % window_seconds if sliding else reset_at - window_seconds
-    )
+    cycle_start = now_epoch - now_epoch % window_seconds if sliding else reset_at - window_seconds
     cycle_end = cycle_start + window_seconds
     if not sliding and (now_epoch < cycle_start or now_epoch >= reset_at):
         return None

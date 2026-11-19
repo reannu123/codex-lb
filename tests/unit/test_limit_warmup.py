@@ -1615,14 +1615,17 @@ def test_sliding_idle_reset_reaches_nonzero_slot_on_stable_clock_grid() -> None:
     cohort = ["acc_1", "acc_2"]
     for second in range(0, 9_000, 60):
         now = datetime.fromtimestamp(second, tz=timezone.utc).replace(tzinfo=None)
-        assert limit_warmup_service._staggered_idle_due(
-            "acc_2",
-            cohort,
-            now=now,
-            reset_at=second + 18_000,
-            sample_recorded_at=now,
-            interval_started_at=now - timedelta(seconds=60),
-        ) is None
+        assert (
+            limit_warmup_service._staggered_idle_due(
+                "acc_2",
+                cohort,
+                now=now,
+                reset_at=second + 18_000,
+                sample_recorded_at=now,
+                interval_started_at=now - timedelta(seconds=60),
+            )
+            is None
+        )
 
     at_slot = datetime.fromtimestamp(9_000, tz=timezone.utc).replace(tzinfo=None)
     due = limit_warmup_service._staggered_idle_due(
