@@ -23,8 +23,6 @@ scheduler.
   "Warm up now" action. The request is pinned to the selected account, needs
   `accounts:write`, uses a rolling 300-second cooldown, records an attempt and
   a request log, and does not depend on the automatic opt-in.
-- Add a branch-scoped GHCR test-image workflow that publishes only after CI
-  passes on the exact commit.
 
 ## Non-goals
 
