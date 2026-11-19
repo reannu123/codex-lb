@@ -249,6 +249,15 @@ export const AccountLimitWarmupUpdateRequestSchema = z.object({
   enabled: z.boolean(),
 });
 
+export const AccountManualWarmupResponseSchema = z.object({
+  accountId: z.string(),
+  status: z.string(),
+  model: z.string(),
+  attemptedAt: z.string(),
+  errorCode: z.string().nullable().optional(),
+  errorMessage: z.string().nullable().optional(),
+});
+
 export const AccountLimitWarmupUpdateResponseSchema = z.object({
   status: z.string(),
   enabled: z.boolean(),

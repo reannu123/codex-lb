@@ -13,6 +13,7 @@ import {
   getRateLimitResetCredits,
   importAccount,
   listAccounts,
+  manuallyWarmupAccount,
   pauseAccount,
   probeAccount,
   reactivateAccount,
@@ -182,6 +183,21 @@ export function useAccountMutations() {
     },
   });
 
+  const manualWarmupMutation = useMutation({
+    mutationFn: manuallyWarmupAccount,
+    onSuccess: (result, accountId) => {
+      if (result.status === "succeeded") {
+        toast.success(t("accounts.toasts.manualWarmupSucceeded"));
+      } else {
+        toast.error(result.errorMessage || t("accounts.toasts.manualWarmupFailed"));
+      }
+      void invalidateAccountRelatedQueries(queryClient, accountId);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || t("accounts.toasts.manualWarmupFailed"));
+    },
+  });
+
   const routingPolicyMutation = useMutation({
     mutationFn: ({
       accountId,
@@ -252,6 +268,7 @@ export function useAccountMutations() {
     usageResetMutation,
     exportAuthMutation,
     limitWarmupMutation,
+    manualWarmupMutation,
     routingPolicyMutation,
     updateMutation,
     resetCreditConsumeMutation,

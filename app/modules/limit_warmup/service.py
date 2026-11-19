@@ -334,11 +334,63 @@ class LimitWarmupService:
         self._request_logs_repo = request_logs_repo
         self._sender = sender
 
+    async def run_manual_warmup(
+        self,
+        *,
+        account: Account,
+        settings: DashboardSettings,
+    ) -> AccountLimitWarmup | None:
+        """Send one operator-requested warm-up through the audited warm-up pipeline.
+
+        Five-minute buckets are durable idempotency keys, so double-clicks,
+        retries, and concurrent dashboard requests cannot send duplicate
+        warm-ups. A successful response confirms transport, not a new quota window.
+        """
+        if not _account_is_safe_candidate(account) or not account.limit_warmup_enabled:
+            raise ValueError("Manual warm-up requires an active, warm-up-enabled account")
+        sender = self._sender
+        if sender is None:
+            raise RuntimeError("LimitWarmupService requires a sender")
+        model = self._resolve_model(settings.limit_warmup_model, account)
+        if model is None:
+            raise ValueError("No compatible warm-up model is available")
+
+        bind_resilience_toggles(settings)
+        now = utcnow()
+        timestamp = naive_utc_to_epoch(now)
+        attempt = await self._warmup_repo.try_create_attempt(
+            account_id=account.id,
+            window="manual",
+            reset_at=timestamp - timestamp % 300,
+            model=model,
+            attempted_at=now,
+        )
+        if attempt is None:
+            return None
+        try:
+            outcome = await self._send_warmup(
+                attempt,
+                account=account,
+                model=model,
+                prompt=settings.limit_warmup_prompt,
+                sender=sender,
+                semaphore=asyncio.Semaphore(1),
+            )
+            return await self._complete_warmup(outcome)
+        except BaseException:
+            await self._mark_aborted_warmup(
+                attempt,
+                error_code="manual_warmup_interrupted",
+                error_message="Manual warm-up interrupted before completion",
+            )
+            raise
+
     async def run_after_usage_refresh(
         self,
         *,
         accounts: list[Account],
         stagger_accounts: list[Account] | None = None,
+        stagger_primary: dict[str, UsageHistory] | None = None,
         settings: DashboardSettings,
         before_primary: dict[str, UsageHistory],
         before_secondary: dict[str, UsageHistory],
@@ -368,7 +420,12 @@ class LimitWarmupService:
         staggered_accounts = [
             account
             for account in stagger_source
-            if _account_is_safe_candidate(account) and account.limit_warmup_enabled
+            if _account_is_safe_candidate(account)
+            and account.limit_warmup_enabled
+            and (
+                stagger_primary is None
+                or _eligible_stagger_cohort_entry(stagger_primary.get(account.id))
+            )
         ]
         now = utcnow()
 
@@ -863,6 +920,7 @@ def _build_staggered_idle_candidate(
         [candidate.id for candidate in accounts],
         now=now,
         reset_at=after.reset_at,
+        sample_recorded_at=after.recorded_at,
         interval_started_at=refresh_started_at,
         usage_refresh_interval_seconds=usage_refresh_interval_seconds,
         window_seconds=window_seconds,
@@ -876,7 +934,45 @@ def _build_staggered_idle_candidate(
         window_seconds=window_seconds,
     ):
         return None
-    return _WarmupCandidate(reset_at=after.reset_at, window=_IDLE_PRIMARY_WINDOW)
+    # Sliding, not-started quotas have no stable upstream reset identity.
+    # Persist the deterministic scheduling cycle as the dedupe identity.
+    is_sliding = _is_sliding_idle_reset(
+        reset_at=after.reset_at,
+        recorded_at=after.recorded_at,
+        now=now,
+        window_seconds=window_seconds,
+        tolerance_seconds=max(_STAGGER_SLOT_GRACE_SECONDS, usage_refresh_interval_seconds * 2),
+    )
+    return _WarmupCandidate(
+        reset_at=due.cycle_end if is_sliding else after.reset_at,
+        window=_IDLE_PRIMARY_WINDOW,
+    )
+
+
+def _eligible_stagger_cohort_entry(entry: UsageHistory | None) -> bool:
+    return bool(
+        entry is not None
+        and entry.reset_at is not None
+        and (entry.window_minutes is None or 0 < entry.window_minutes <= _SHORT_WINDOW_MAX_MINUTES)
+    )
+
+
+def _is_sliding_idle_reset(
+    *,
+    reset_at: int,
+    recorded_at: datetime | None,
+    now: datetime,
+    window_seconds: int,
+    tolerance_seconds: int,
+) -> bool:
+    if recorded_at is None:
+        return False
+    observed_at = naive_utc_to_epoch(recorded_at)
+    # A fixed, newly opened window can initially resemble a sliding one.
+    # Only a fresh per-poll sample may select the not-started clock grid.
+    if abs(naive_utc_to_epoch(now) - observed_at) > max(300, tolerance_seconds * 2):
+        return False
+    return abs((reset_at - observed_at) - window_seconds) <= tolerance_seconds
 
 
 @dataclass(frozen=True, slots=True)
@@ -900,6 +996,7 @@ def _staggered_idle_due(
     *,
     now: datetime,
     reset_at: int,
+    sample_recorded_at: datetime | None = None,
     interval_started_at: datetime | None = None,
     usage_refresh_interval_seconds: int = _STAGGER_SLOT_GRACE_SECONDS,
     window_seconds: int = _ROLLING_WINDOW_SECONDS,
@@ -913,8 +1010,21 @@ def _staggered_idle_due(
         return None
 
     now_epoch = naive_utc_to_epoch(now)
-    cycle_start = reset_at - window_seconds
-    if now_epoch < cycle_start or now_epoch >= reset_at:
+    # An unstarted rolling window can report reset_at = observed_at +
+    # window_seconds forever. Anchor those slots on a stable UTC grid instead
+    # of chasing that sliding reset_at (upstream issue #1976).
+    sliding = _is_sliding_idle_reset(
+        reset_at=reset_at,
+        recorded_at=sample_recorded_at,
+        now=now,
+        window_seconds=window_seconds,
+        tolerance_seconds=max(_STAGGER_SLOT_GRACE_SECONDS, usage_refresh_interval_seconds * 2),
+    )
+    cycle_start = (
+        now_epoch - now_epoch % window_seconds if sliding else reset_at - window_seconds
+    )
+    cycle_end = cycle_start + window_seconds
+    if not sliding and (now_epoch < cycle_start or now_epoch >= reset_at):
         return None
     elapsed = now_epoch - cycle_start
     slot_offset = int(account_index * window_seconds / len(ordered_account_ids))
@@ -927,7 +1037,7 @@ def _staggered_idle_due(
     if slot_offset + grace_seconds <= interval_start_elapsed:
         return None
     return _StaggeredIdleDue(
-        cycle_end=cycle_start + window_seconds,
+        cycle_end=cycle_end,
         slot_offset_seconds=slot_offset,
     )
 

@@ -265,6 +265,10 @@ class UsageRefreshScheduler:
                         )
                         dashboard_settings = await settings_repo.get_or_create()
                         refreshed_accounts = await accounts_repo.list_accounts(refresh_existing=True)
+                        stagger_primary = await usage_repo.latest_by_account(
+                            window="primary",
+                            account_ids=[account.id for account in refreshed_accounts],
+                        )
                         refreshed_selected_accounts = [
                             account for account in refreshed_accounts if account.id == selected_account.id
                         ]
@@ -299,6 +303,7 @@ class UsageRefreshScheduler:
                     await warmup_service.run_after_usage_refresh(
                         accounts=refreshed_selected_accounts,
                         stagger_accounts=refreshed_accounts,
+                        stagger_primary=stagger_primary,
                         settings=dashboard_settings,
                         before_primary=before_primary,
                         before_secondary=_select_long_window_entries(

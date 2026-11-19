@@ -7,6 +7,51 @@ import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { ADMIN_PERMISSIONS, OPERATOR_PERMISSIONS, createAccountSummary } from "@/test/mocks/factories";
 
 describe("AccountActions", () => {
+  it("runs manual warm-up only for eligible accounts", async () => {
+    const onManualWarmup = vi.fn();
+    const account = createAccountSummary({ status: "active", limitWarmupEnabled: true });
+
+    const { rerender } = render(
+      <AccountActions
+        account={account}
+        busy={false}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onProbe={vi.fn()}
+        onDelete={vi.fn()}
+        onReauth={vi.fn()}
+        onExportAuth={vi.fn()}
+        onResetCredit={vi.fn()}
+        onSecurityWorkAuthorizedChange={vi.fn()}
+        onLimitWarmupChange={vi.fn()}
+        onManualWarmup={onManualWarmup}
+        onRoutingPolicyChange={vi.fn()}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "Warm up now" });
+    await userEvent.setup().click(button);
+    expect(onManualWarmup).toHaveBeenCalledWith(account.accountId);
+
+    rerender(
+      <AccountActions
+        account={{ ...account, limitWarmupEnabled: false }}
+        busy={false}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onProbe={vi.fn()}
+        onDelete={vi.fn()}
+        onReauth={vi.fn()}
+        onExportAuth={vi.fn()}
+        onResetCredit={vi.fn()}
+        onSecurityWorkAuthorizedChange={vi.fn()}
+        onLimitWarmupChange={vi.fn()}
+        onManualWarmup={onManualWarmup}
+        onRoutingPolicyChange={vi.fn()}
+      />,
+    );
+    expect(button).toBeDisabled();
+  });
+
   it.each([
     ["shows", ADMIN_PERMISSIONS, true],
     ["hides", OPERATOR_PERMISSIONS, false],

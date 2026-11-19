@@ -188,6 +188,15 @@ class AccountLimitWarmupUpdateResponse(DashboardModel):
     enabled: bool
 
 
+class AccountManualWarmupResponse(DashboardModel):
+    account_id: str
+    status: str
+    model: str
+    attempted_at: datetime
+    error_code: str | None = None
+    error_message: str | None = None
+
+
 class AccountRoutingPolicyUpdateRequest(DashboardModel):
     routing_policy: str = Field(pattern=r"^(normal|burn_first|preserve)$")
 
