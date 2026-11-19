@@ -108,7 +108,9 @@ class LimitWarmupSender(Protocol):
 
 
 class LimitWarmupAttemptsRepository(Protocol):
-    async def latest_by_account(self, account_ids: list[str]) -> dict[str, AccountLimitWarmup]: ...
+    async def latest_by_account(
+        self, account_ids: list[str], *, window: str | None = None
+    ) -> dict[str, AccountLimitWarmup]: ...
 
     async def try_create_attempt(
         self,
@@ -417,10 +419,14 @@ class LimitWarmupService:
                 "A warm-up for this account is already in progress",
             )
         claim_key = naive_utc_to_epoch(now)
-        if latest_attempt is not None and latest_attempt.window == MANUAL_WARMUP_WINDOW:
-            # A retry right after a failed attempt must not collide with that
-            # attempt's exact (account, window, second) tuple.
-            claim_key = max(claim_key, latest_attempt.reset_at + 1)
+        latest_manual = (await self._warmup_repo.latest_by_account([account.id], window=MANUAL_WARMUP_WINDOW)).get(
+            account.id
+        )
+        if latest_manual is not None:
+            # A retry right after a failed manual attempt must not collide with
+            # that attempt's exact (account, window, second) tuple, even if an
+            # automatic attempt landed in between.
+            claim_key = max(claim_key, latest_manual.reset_at + 1)
         attempt = await self._warmup_repo.try_create_attempt(
             account_id=account.id,
             window=MANUAL_WARMUP_WINDOW,

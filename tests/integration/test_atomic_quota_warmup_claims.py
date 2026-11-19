@@ -865,8 +865,10 @@ async def test_concurrent_initial_free_quota_claims_allow_one_sliding_deadline(
     )
 
     class BarrierWarmupRepository(LimitWarmupRepository):
-        async def latest_by_account(self, account_ids: list[str]) -> dict[str, AccountLimitWarmup]:
-            attempts = await super().latest_by_account(account_ids)
+        async def latest_by_account(
+            self, account_ids: list[str], *, window: str | None = None
+        ) -> dict[str, AccountLimitWarmup]:
+            attempts = await super().latest_by_account(account_ids, window=window)
             await self._session.rollback()
             await barrier.wait()
             return attempts
