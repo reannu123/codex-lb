@@ -1,0 +1,214 @@
+name: Publish fork test image
+
+# FORK-ONLY, DO NOT MERGE. Publishes a test image of the warm-up change (PR #1)
+# plus the fork's security bumps, only after the CI run of this branch's draft
+# PR has succeeded for the exact pushed commit. workflow_run and
+# workflow_dispatch only fire for workflows on the default branch, so this
+# branch-scoped workflow triggers on push and gates itself on CI instead.
+# Every CI job must be green; the only exception is the Rust workspace job
+# failing solely at its cargo-deny step (advisories pre-existing on main).
+# Re-run a gated run from the Actions tab once CI has finished if it timed out.
+on:
+  push:
+    branches: ["fix/staggered-idle-manual-warmup-test-image"]
+
+permissions: {}
+
+concurrency:
+  group: fork-test-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci-gate:
+    name: Wait for green CI on this commit
+    if: github.repository == 'reannu123/codex-lb'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Require the tested tree to equal this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          # Pull-request CI tests the merge of the head into main. The trees
+          # are identical only when the head already contains main's tip.
+          behind=$(gh api "repos/${REPO}/compare/main...${SHA}" --jq '.behind_by')
+          if [ "${behind}" != "0" ]; then
+            echo "::error::${SHA} is ${behind} commit(s) behind main; rebase so CI tests this exact tree."
+            exit 1
+          fi
+
+      - name: Wait for the CI workflow run on this commit
+        id: ci-run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          deadline=$(( $(date +%s) + 110 * 60 ))
+          while :; do
+            run=$(gh api "repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${SHA}&event=pull_request&per_page=1" \
+              --jq '.workflow_runs[0] | select(. != null) | "\(.id) \(.status) \(.conclusion)"')
+            if [ -n "${run}" ]; then
+              read -r run_id status conclusion <<<"${run}"
+              echo "CI run ${run_id}: status=${status} conclusion=${conclusion}"
+              if [ "${status}" = "completed" ]; then
+                echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            else
+              echo "No pull_request CI run for ${SHA} yet."
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::Timed out waiting for CI on ${SHA}."
+              exit 1
+            fi
+            sleep 60
+          done
+
+      - name: Require every CI job green (narrow cargo-deny exception)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          RUN_ID: ${{ steps.ci-run.outputs.run_id }}
+        run: |
+          gh api --paginate "repos/${REPO}/actions/runs/${RUN_ID}/jobs?filter=latest&per_page=100" \
+            --jq '.jobs[]' > jobs.jsonl
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          # Exception scope: fork test image only. Main's Cargo.lock carries
+          # RustSEC advisories (upstream issue), so the Rust job may fail ONLY in
+          # its cargo-deny step while every build/test step succeeds. Any other
+          # failure, or any change to these step names, fails closed.
+          RUST_JOB = "Rust workspace"
+          AUDIT_STEP = "Audit Rust dependencies and licenses"
+          RUST_REQUIRED_GREEN = {
+              "Check formatting, lints, tests, and release build",
+              "Run native routed and SSE wire probes",
+          }
+          AGGREGATE_JOB = "CI Required"
+          OK = {"success", "skipped"}
+
+          jobs = [json.loads(line) for line in open("jobs.jsonl") if line.strip()]
+          sha = os.environ["SHA"]
+          problems = []
+          if not jobs:
+              problems.append("CI run has no jobs")
+          if any(job["head_sha"] != sha for job in jobs):
+              problems.append("CI jobs are not for the pushed commit")
+
+          rust_exception_used = False
+          for job in jobs:
+              name, conclusion = job["name"], job["conclusion"]
+              if job["status"] != "completed":
+                  problems.append(f"{name}: not completed")
+              elif name == RUST_JOB and conclusion == "failure":
+                  steps = {step["name"]: step["conclusion"] for step in job.get("steps", [])}
+                  missing = (RUST_REQUIRED_GREEN | {AUDIT_STEP}) - steps.keys()
+                  if missing:
+                      problems.append(f"{RUST_JOB}: expected steps missing {sorted(missing)}")
+                      continue
+                  not_green = [s for s in RUST_REQUIRED_GREEN if steps[s] != "success"]
+                  other_bad = [
+                      s for s, c in steps.items() if s != AUDIT_STEP and s not in RUST_REQUIRED_GREEN and c not in OK
+                  ]
+                  if not_green or other_bad or steps[AUDIT_STEP] != "failure":
+                      problems.append(f"{RUST_JOB}: failures beyond cargo-deny {not_green + other_bad}")
+                      continue
+                  rust_exception_used = True
+                  print(f"::warning::{RUST_JOB} failed only at '{AUDIT_STEP}' (pre-existing main advisories); allowed for the fork test image.")
+              elif name == AGGREGATE_JOB and conclusion == "failure":
+                  continue  # judged after the loop
+              elif conclusion not in OK:
+                  problems.append(f"{name}: {conclusion}")
+
+          aggregate = [job for job in jobs if job["name"] == AGGREGATE_JOB]
+          if len(aggregate) != 1:
+              problems.append(f"expected exactly one '{AGGREGATE_JOB}' job")
+          elif aggregate[0]["conclusion"] == "failure" and not rust_exception_used:
+              problems.append(f"{AGGREGATE_JOB}: failure not explained by the cargo-deny exception")
+
+          for job in jobs:
+              print(f"{job['conclusion']:>10}  {job['name']}")
+          if problems:
+              for problem in problems:
+                  print(f"::error::{problem}")
+              sys.exit(1)
+          print("CI gate passed for", sha)
+          PY
+
+  publish:
+    name: Build and push test image
+    needs: ci-gate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out the tested commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Resolve image name
+        id: image
+        env:
+          REPO: ${{ github.repository }}
+        run: echo "name=ghcr.io/${REPO,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+
+      - name: Authenticate to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Explicit tags only: an immutable per-commit tag and the moving test
+      # tag. This workflow never pushes `latest` or a release tag.
+      - name: Build and push (linux/amd64)
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.image.outputs.name }}:sha-${{ github.sha }}
+            ${{ steps.image.outputs.name }}:staggered-warmup-test
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Verify the image ships the built dashboard
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}:sha-${{ github.sha }}
+        run: |
+          docker pull "${IMAGE}"
+          docker run --rm --entrypoint sh "${IMAGE}" -c 'test -f /app/app/static/index.html && ls /app/app/static | head'
+
+      - name: Summary
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          SHA: ${{ github.sha }}
+        run: |
+          {
+            echo "### Test image"
+            echo "- \`${IMAGE}:sha-${SHA}\`"
+            echo "- \`${IMAGE}:staggered-warmup-test\`"
+            echo "- digest: \`${DIGEST}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

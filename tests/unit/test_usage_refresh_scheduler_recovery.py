@@ -1583,8 +1583,46 @@ async def test_refresh_slices_scope_queries_and_followups_to_selected_account(
     ]
     assert set(cast("dict[str, UsageHistory]", warmup_calls[0]["before_primary"])) == {"acc_b"}
     assert set(cast("dict[str, UsageHistory]", warmup_calls[0]["after_primary"])) == {"acc_b"}
+    # Stagger cohort eligibility is remembered from each account's own slice;
+    # no slice reads another account's usage history to build it.
+    assert warmup_calls[0]["stagger_short_window_eligibility"] == {"acc_a": True, "acc_b": True}
     assert invalidations == 1
     assert open_sessions == 0
+
+
+def test_scheduler_remembers_stagger_eligibility_only_for_current_roster() -> None:
+    scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
+    short_account = _make_account("acc_short", status=AccountStatus.ACTIVE)
+    weekly_account = _make_account("acc_weekly", status=AccountStatus.ACTIVE)
+    missing_account = _make_account("acc_missing", status=AccountStatus.ACTIVE)
+    roster = [short_account, weekly_account, missing_account]
+
+    def _primary(account_id: str, window_minutes: int) -> UsageHistory:
+        return _make_usage(
+            account_id,
+            window="primary",
+            used_percent=0.0,
+            reset_at=1_800_000_000,
+            recorded_at=datetime(2026, 1, 1),
+            window_minutes=window_minutes,
+        )
+
+    scheduler._remember_stagger_eligibility(
+        roster=roster, selected_account=short_account, latest_primary={"acc_short": _primary("acc_short", 300)}
+    )
+    scheduler._remember_stagger_eligibility(
+        roster=roster, selected_account=weekly_account, latest_primary={"acc_weekly": _primary("acc_weekly", 10_080)}
+    )
+    scheduler._remember_stagger_eligibility(roster=roster, selected_account=missing_account, latest_primary={})
+    assert scheduler._stagger_short_window_eligibility == {
+        "acc_short": True,
+        "acc_weekly": False,
+        "acc_missing": False,
+    }
+
+    # An account that leaves the refresh roster (deleted, paused) is forgotten.
+    scheduler._remember_stagger_eligibility(roster=[short_account], selected_account=None, latest_primary={})
+    assert scheduler._stagger_short_window_eligibility == {"acc_short": True}
 
 
 @pytest.mark.asyncio

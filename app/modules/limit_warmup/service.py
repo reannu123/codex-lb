@@ -5,8 +5,8 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import AsyncContextManager, Callable, Protocol
+from datetime import datetime, timedelta
+from typing import AsyncContextManager, Callable, Mapping, Protocol
 
 from app.core import usage as usage_core
 from app.core.auth.refresh import RefreshError
@@ -38,6 +38,17 @@ _MAX_CONCURRENT_WARMUP_SENDS = 4
 _ROLLING_WINDOW_SECONDS = 300 * 60
 _SHORT_WINDOW_MAX_MINUTES = 24 * 60
 _STAGGER_SLOT_GRACE_SECONDS = 60
+# Upper bound on how long after its slot opens an idle account may still be
+# pre-started, so a delayed refresh does not skip the whole cycle.
+_STAGGER_CATCH_UP_MAX_SECONDS = 15 * 60
+# A not-started short window reports reset_at = observed_at + window. Allow
+# for the fetch-to-write delay and upstream rounding of reset_after_seconds.
+_SLIDING_RESET_TOLERANCE_SECONDS = 30
+# Operator-excluded states leave the stagger cohort. Transient blocks
+# (rate_limited, quota_exceeded) keep their slot so phases stay stable.
+_STAGGER_COHORT_EXCLUDED_STATUSES = frozenset(
+    {AccountStatus.PAUSED, AccountStatus.DEACTIVATED, AccountStatus.REAUTH_REQUIRED}
+)
 _IDLE_PRIMARY_WINDOW = "primary_idle"
 # Minimum reset_at forward jump (in seconds) to confirm a real quota window reset.
 # Upstream timestamp jitter of ~1 second must not trigger a warm-up.
@@ -71,12 +82,35 @@ class LimitWarmupSendOutcome:
     error_message: str | None = None
 
 
+MANUAL_WARMUP_WINDOW = "manual"
+MANUAL_WARMUP_COOLDOWN_SECONDS = 300
+# Attempts in these states hold the manual cooldown; a failed attempt does not,
+# so an operator can retry after an auth or transport failure.
+_MANUAL_WARMUP_BLOCKING_STATUSES = ("pending", "succeeded")
+
+
+class ManualWarmupUnavailableError(Exception):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+@dataclass(frozen=True, slots=True)
+class ManualWarmupResult:
+    attempt: AccountLimitWarmup
+    request_id: str | None
+    succeeded: bool
+
+
 class LimitWarmupSender(Protocol):
     async def send(self, account: Account, *, model: str, prompt: str) -> LimitWarmupSendResult: ...
 
 
 class LimitWarmupAttemptsRepository(Protocol):
-    async def latest_by_account(self, account_ids: list[str]) -> dict[str, AccountLimitWarmup]: ...
+    async def latest_by_account(
+        self, account_ids: list[str], *, window: str | None = None
+    ) -> dict[str, AccountLimitWarmup]: ...
 
     async def try_create_attempt(
         self,
@@ -89,6 +123,7 @@ class LimitWarmupAttemptsRepository(Protocol):
         status: str = "pending",
         reset_at_tolerance_seconds: int = 0,
         require_no_prior_attempt: bool = False,
+        blocking_statuses: tuple[str, ...] | None = None,
     ) -> AccountLimitWarmup | None: ...
 
     async def complete_attempt(
@@ -105,6 +140,7 @@ class LimitWarmupAttemptsRepository(Protocol):
 class LimitWarmupRequestLogRepository(Protocol):
     async def add_log(
         self,
+        *,
         account_id: str | None,
         request_id: str,
         model: str,
@@ -152,9 +188,13 @@ class StreamingLimitWarmupSender:
         accounts_repo: AccountsRepository,
         *,
         accounts_repo_factory: Callable[[], AsyncContextManager[AccountsRepository]] | None = None,
+        require_limit_warmup_opt_in: bool = True,
     ) -> None:
         self._accounts_repo = accounts_repo
         self._accounts_repo_factory = accounts_repo_factory
+        # Automatic warm-ups require the per-account opt-in; an operator's
+        # explicit manual warm-up does not (the account must still be active).
+        self._require_opt_in = require_limit_warmup_opt_in
         self._auth_manager = AuthManager(accounts_repo)
         self._encryptor = TokenEncryptor()
         self._auth_lock = asyncio.Lock()
@@ -168,11 +208,11 @@ class StreamingLimitWarmupSender:
                 if (
                     fresh_account is None
                     or not _account_is_safe_candidate(fresh_account)
-                    or not fresh_account.limit_warmup_enabled
+                    or not self._opted_in(fresh_account)
                 ):
                     if fresh_account is None:
                         error_message = "Account no longer exists"
-                    elif not fresh_account.limit_warmup_enabled:
+                    elif not self._opted_in(fresh_account):
                         error_message = "Limit warm-up is disabled for this account"
                     else:
                         error_message = f"Account status is {fresh_account.status.value}"
@@ -285,16 +325,19 @@ class StreamingLimitWarmupSender:
             upstream_proxy_fallback_used=route_trace.fallback_used,
         )
 
+    def _opted_in(self, account: Account) -> bool:
+        return account.limit_warmup_enabled or not self._require_opt_in
+
     async def _ensure_fresh(self, account: Account) -> Account | None:
         if self._accounts_repo_factory is None:
             current = await self._accounts_repo.get_by_id_fresh(account.id)
-            if current is None or not _account_is_safe_candidate(current) or not current.limit_warmup_enabled:
+            if current is None or not _account_is_safe_candidate(current) or not self._opted_in(current):
                 return current
             await self._auth_manager.ensure_fresh(current)
             return await self._accounts_repo.get_by_id_fresh(account.id)
         async with self._accounts_repo_factory() as accounts_repo:
             current = await accounts_repo.get_by_id_fresh(account.id)
-            if current is None or not _account_is_safe_candidate(current) or not current.limit_warmup_enabled:
+            if current is None or not _account_is_safe_candidate(current) or not self._opted_in(current):
                 return current
             await AuthManager(
                 accounts_repo,
@@ -334,11 +377,99 @@ class LimitWarmupService:
         self._request_logs_repo = request_logs_repo
         self._sender = sender
 
+    async def run_manual_warmup(
+        self,
+        *,
+        account: Account,
+        settings: DashboardSettings,
+    ) -> ManualWarmupResult:
+        """Send one operator-requested warm-up pinned to ``account``.
+
+        The attempt claim is atomic and rolling: a pending or succeeded manual
+        attempt for the account within the last ``MANUAL_WARMUP_COOLDOWN_SECONDS``
+        rejects the request, so double clicks and concurrent requests send at
+        most one upstream request. A failed attempt can be retried at once. A
+        completed upstream request is not proof that a quota window started.
+        """
+        if not _account_is_safe_candidate(account):
+            raise ManualWarmupUnavailableError(
+                "manual_warmup_account_not_active",
+                f"Manual warm-up requires an active account (status is {account.status.value})",
+            )
+        sender = self._sender
+        if sender is None:
+            raise RuntimeError("LimitWarmupService requires a sender")
+        model = self._resolve_model(settings.limit_warmup_model, account)
+        if model is None:
+            raise ManualWarmupUnavailableError(
+                "manual_warmup_model_unavailable",
+                "No eligible priced text model is available for warm-up",
+            )
+
+        bind_resilience_toggles(settings)
+        now = utcnow()
+        latest_attempt = (await self._warmup_repo.latest_by_account([account.id])).get(account.id)
+        if (
+            latest_attempt is not None
+            and latest_attempt.status == "pending"
+            and now - latest_attempt.attempted_at < timedelta(seconds=MANUAL_WARMUP_COOLDOWN_SECONDS)
+        ):
+            raise ManualWarmupUnavailableError(
+                "manual_warmup_in_progress",
+                "A warm-up for this account is already in progress",
+            )
+        claim_key = naive_utc_to_epoch(now)
+        latest_manual = (await self._warmup_repo.latest_by_account([account.id], window=MANUAL_WARMUP_WINDOW)).get(
+            account.id
+        )
+        if latest_manual is not None:
+            # A retry right after a failed manual attempt must not collide with
+            # that attempt's exact (account, window, second) tuple, even if an
+            # automatic attempt landed in between.
+            claim_key = max(claim_key, latest_manual.reset_at + 1)
+        attempt = await self._warmup_repo.try_create_attempt(
+            account_id=account.id,
+            window=MANUAL_WARMUP_WINDOW,
+            reset_at=claim_key,
+            model=model,
+            attempted_at=now,
+            reset_at_tolerance_seconds=MANUAL_WARMUP_COOLDOWN_SECONDS - 1,
+            blocking_statuses=_MANUAL_WARMUP_BLOCKING_STATUSES,
+        )
+        if attempt is None:
+            raise ManualWarmupUnavailableError(
+                "manual_warmup_cooldown",
+                "A manual warm-up was already sent for this account in the last five minutes",
+            )
+        try:
+            outcome = await self._send_warmup(
+                attempt,
+                account=account,
+                model=model,
+                prompt=settings.limit_warmup_prompt,
+                sender=sender,
+                semaphore=asyncio.Semaphore(1),
+            )
+            completed = await self._complete_warmup(outcome)
+        except BaseException:
+            await self._mark_aborted_warmup(
+                attempt,
+                error_code="manual_warmup_interrupted",
+                error_message="Manual warm-up interrupted before completion",
+            )
+            raise
+        return ManualWarmupResult(
+            attempt=completed or attempt,
+            request_id=outcome.result.request_id if outcome.result is not None else None,
+            succeeded=outcome.result is not None and outcome.result.success,
+        )
+
     async def run_after_usage_refresh(
         self,
         *,
         accounts: list[Account],
         stagger_accounts: list[Account] | None = None,
+        stagger_short_window_eligibility: Mapping[str, bool] | None = None,
         settings: DashboardSettings,
         before_primary: dict[str, UsageHistory],
         before_secondary: dict[str, UsageHistory],
@@ -365,11 +496,16 @@ class LimitWarmupService:
         send_tasks: dict[asyncio.Task[LimitWarmupSendOutcome], AccountLimitWarmup] = {}
         send_semaphore = asyncio.Semaphore(_MAX_CONCURRENT_WARMUP_SENDS)
         stagger_source = accounts if stagger_accounts is None else stagger_accounts
-        staggered_accounts = [
-            account
-            for account in stagger_source
-            if _account_is_safe_candidate(account) and account.limit_warmup_enabled
-        ]
+        if stagger_short_window_eligibility is None:
+            # Callers without a remembered roster view supply every cohort
+            # member's latest primary sample; a missing sample is ineligible.
+            stagger_short_window_eligibility = {
+                account.id: stagger_short_window_eligible(after_primary.get(account.id)) for account in stagger_source
+            }
+        stagger_cohort = _stagger_cohort(
+            stagger_source,
+            short_window_eligibility=stagger_short_window_eligibility,
+        )
         now = utcnow()
 
         for account in accounts:
@@ -415,11 +551,13 @@ class LimitWarmupService:
                     and _account_is_safe_candidate(account)
                     and settings.limit_warmup_staggered_idle_enabled
                     and window == "primary"
+                    and stagger_cohort is not None
                 ):
                     candidate = _build_staggered_idle_candidate(
                         account=account,
-                        accounts=staggered_accounts,
+                        cohort_account_ids=stagger_cohort,
                         now=now,
+                        before_primary=before_primary,
                         after_primary=after_primary,
                         refresh_started_at=refresh_started_at,
                         usage_refresh_interval_seconds=usage_refresh_interval_seconds,
@@ -838,45 +976,105 @@ def _build_initial_free_quota_candidate(
 def _build_staggered_idle_candidate(
     *,
     account: Account,
-    accounts: list[Account],
+    cohort_account_ids: list[str],
     now: datetime,
+    before_primary: dict[str, UsageHistory],
     after_primary: dict[str, UsageHistory],
     refresh_started_at: datetime | None,
     usage_refresh_interval_seconds: int,
     idle_threshold_percent: float = 1.0,
 ) -> _WarmupCandidate | None:
     after = after_primary.get(account.id)
-    if after is None:
+    if after is None or after.reset_at is None:
         return None
-    if after.reset_at is None:
-        return None
-    if after.window_minutes is not None and after.window_minutes > _SHORT_WINDOW_MAX_MINUTES:
+    if not stagger_short_window_eligible(after):
         # Any long window (weekly, monthly, or a nonstandard duration over
         # 24h) has no short phase to pre-start.
         return None
     if after.used_percent > idle_threshold_percent:
         return None
-
+    # Only a sample written by this refresh slice may trigger synthetic
+    # traffic; stale or carried-over usage history never does.
+    if refresh_started_at is None or after.recorded_at < refresh_started_at:
+        return None
     window_seconds = _rolling_window_seconds(after)
+    if not _short_window_not_started(before=before_primary.get(account.id), after=after):
+        return None
     due = _staggered_idle_due(
         account.id,
-        [candidate.id for candidate in accounts],
+        cohort_account_ids,
         now=now,
-        reset_at=after.reset_at,
-        interval_started_at=refresh_started_at,
-        usage_refresh_interval_seconds=usage_refresh_interval_seconds,
         window_seconds=window_seconds,
+        usage_refresh_interval_seconds=usage_refresh_interval_seconds,
     )
     if due is None:
         return None
-    if not _usage_entry_refreshed_for_cycle(
-        after,
-        refresh_started_at=refresh_started_at,
-        cycle_end=due.cycle_end,
-        window_seconds=window_seconds,
-    ):
-        return None
-    return _WarmupCandidate(reset_at=after.reset_at, window=_IDLE_PRIMARY_WINDOW)
+    # A not-started window has no stable upstream reset identity, so the
+    # UTC grid cycle is the durable dedupe identity. It is identical across
+    # refreshes, restarts, and replicas.
+    return _WarmupCandidate(reset_at=due.cycle_end, window=_IDLE_PRIMARY_WINDOW)
+
+
+def stagger_short_window_eligible(entry: UsageHistory | None) -> bool:
+    """Whether a latest primary sample places an account in the short-window stagger cohort."""
+    if entry is None:
+        return False
+    return entry.window_minutes is None or entry.window_minutes <= _SHORT_WINDOW_MAX_MINUTES
+
+
+def _stagger_cohort(
+    accounts: list[Account],
+    *,
+    short_window_eligibility: Mapping[str, bool],
+) -> list[str] | None:
+    """Return the sorted short-window cohort, or ``None`` while membership is unknown.
+
+    Membership depends only on account state and known eligibility, never on
+    enumeration order. Transiently blocked accounts keep their slot so that a
+    rate limit does not reshuffle every other account's phase; operator-
+    excluded states (paused, deactivated, reauth required) and opted-out or
+    deleted accounts leave the cohort.
+    """
+    members: set[str] = set()
+    for account in accounts:
+        if not account.limit_warmup_enabled or account.status in _STAGGER_COHORT_EXCLUDED_STATUSES:
+            continue
+        if account.delete_requested_at is not None:
+            continue
+        eligible = short_window_eligibility.get(account.id)
+        if eligible is None:
+            return None
+        if eligible:
+            members.add(account.id)
+    return sorted(members)
+
+
+def _reset_slides_with_observation(entry: UsageHistory) -> bool:
+    if entry.reset_at is None or entry.recorded_at is None:
+        return False
+    observed_at = naive_utc_to_epoch(entry.recorded_at)
+    return abs(entry.reset_at - observed_at - _rolling_window_seconds(entry)) <= _SLIDING_RESET_TOLERANCE_SECONDS
+
+
+def _short_window_not_started(*, before: UsageHistory | None, after: UsageHistory) -> bool:
+    """Whether consecutive samples show a short window that has not started.
+
+    A not-started window reports ``reset_at ~= observed_at + window`` on every
+    poll (upstream #1976). A single such sample is ambiguous with a window
+    that started moments ago, so the previous observation must corroborate
+    it: either it slid as well, or the window it described had already ended
+    by the time of the new observation. A previous window that is still
+    running means real usage owns the account's phase and is never touched.
+    """
+    if not _reset_slides_with_observation(after):
+        return False
+    if before is None or before.reset_at is None or before.recorded_at is None:
+        return False
+    if before.recorded_at > after.recorded_at:
+        return False
+    if _reset_slides_with_observation(before):
+        return True
+    return before.reset_at <= naive_utc_to_epoch(after.recorded_at) + _SLIDING_RESET_TOLERANCE_SECONDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -894,62 +1092,47 @@ def _rolling_window_seconds(entry: UsageHistory) -> int:
     return _ROLLING_WINDOW_SECONDS
 
 
+def _stagger_catch_up_seconds(*, window_seconds: int, cohort_size: int, usage_refresh_interval_seconds: int) -> int:
+    # A slot stays claimable for a bounded time after it opens so one failed or
+    # delayed refresh does not skip a whole cycle. Capping it at half the slot
+    # spacing keeps two slots from both being claimable after a restart.
+    spread_bound = window_seconds // (2 * cohort_size)
+    refresh_bound = 2 * max(_STAGGER_SLOT_GRACE_SECONDS, usage_refresh_interval_seconds)
+    return max(refresh_bound, min(_STAGGER_CATCH_UP_MAX_SECONDS, spread_bound))
+
+
 def _staggered_idle_due(
     account_id: str,
     account_ids: list[str],
     *,
     now: datetime,
-    reset_at: int,
-    interval_started_at: datetime | None = None,
-    usage_refresh_interval_seconds: int = _STAGGER_SLOT_GRACE_SECONDS,
     window_seconds: int = _ROLLING_WINDOW_SECONDS,
+    usage_refresh_interval_seconds: int = _STAGGER_SLOT_GRACE_SECONDS,
 ) -> _StaggeredIdleDue | None:
-    if not account_ids:
-        return None
+    """Return the account's slot on the epoch-aligned UTC grid if it is claimable now.
+
+    Cycles start at multiples of ``window_seconds`` since the Unix epoch and
+    the sorted cohort is spread evenly across each cycle, so two accounts sit
+    half a window apart and N accounts ``window / N`` apart.
+    """
     ordered_account_ids = sorted(set(account_ids))
-    try:
-        account_index = ordered_account_ids.index(account_id)
-    except ValueError:
+    if account_id not in ordered_account_ids:
         return None
+    account_index = ordered_account_ids.index(account_id)
+    cohort_size = len(ordered_account_ids)
 
     now_epoch = naive_utc_to_epoch(now)
-    cycle_start = reset_at - window_seconds
-    if now_epoch < cycle_start or now_epoch >= reset_at:
-        return None
+    cycle_start = now_epoch - now_epoch % window_seconds
+    slot_offset = account_index * window_seconds // cohort_size
     elapsed = now_epoch - cycle_start
-    slot_offset = int(account_index * window_seconds / len(ordered_account_ids))
-    grace_seconds = max(_STAGGER_SLOT_GRACE_SECONDS, usage_refresh_interval_seconds)
-    interval_start_epoch = naive_utc_to_epoch(interval_started_at) if interval_started_at is not None else now_epoch
-    interval_start_epoch = min(interval_start_epoch, now_epoch)
-    interval_start_elapsed = max(0, interval_start_epoch - cycle_start)
-    if not slot_offset <= elapsed:
-        return None
-    if slot_offset + grace_seconds <= interval_start_elapsed:
-        return None
-    return _StaggeredIdleDue(
-        cycle_end=cycle_start + window_seconds,
-        slot_offset_seconds=slot_offset,
+    catch_up = _stagger_catch_up_seconds(
+        window_seconds=window_seconds,
+        cohort_size=cohort_size,
+        usage_refresh_interval_seconds=usage_refresh_interval_seconds,
     )
-
-
-def _usage_entry_refreshed_for_cycle(
-    entry: UsageHistory,
-    *,
-    refresh_started_at: datetime | None,
-    cycle_end: int | None,
-    window_seconds: int = _ROLLING_WINDOW_SECONDS,
-) -> bool:
-    if entry.recorded_at is None:
-        return False
-    if cycle_end is not None:
-        cycle_start = cycle_end - window_seconds
-        if entry.recorded_at < datetime.fromtimestamp(cycle_start, tz=timezone.utc).replace(tzinfo=None):
-            return False
-        if entry.reset_at is not None and entry.reset_at <= cycle_start:
-            return False
-    if refresh_started_at is None:
-        return True
-    return entry.recorded_at >= refresh_started_at
+    if not slot_offset <= elapsed < slot_offset + catch_up:
+        return None
+    return _StaggeredIdleDue(cycle_end=cycle_start + window_seconds, slot_offset_seconds=slot_offset)
 
 
 def _effective_usage_entry(

@@ -1,6 +1,7 @@
 import {
   Activity,
   Download,
+  Flame,
   Pause,
   Play,
   RefreshCw,
@@ -42,6 +43,7 @@ export type AccountActionsProps = {
   showResetCreditExpiryBadge?: boolean;
   onSecurityWorkAuthorizedChange: (accountId: string, enabled: boolean) => void;
   onLimitWarmupChange: (accountId: string, enabled: boolean) => void;
+  onManualWarmup?: (accountId: string) => void;
   onRoutingPolicyChange: (
     accountId: string,
     routingPolicy: AccountRoutingPolicy,
@@ -62,6 +64,7 @@ export function AccountActions({
   showResetCreditExpiryBadge = true,
   onSecurityWorkAuthorizedChange,
   onLimitWarmupChange,
+  onManualWarmup,
   onRoutingPolicyChange,
 }: AccountActionsProps) {
   const { t } = useTranslation();
@@ -204,6 +207,21 @@ export function AccountActions({
           <Zap className="h-3.5 w-3.5" />
           {account.limitWarmupEnabled ? t("accounts.actions.disableWarmup") : t("accounts.actions.enableWarmup")}
         </Button>
+
+        {onManualWarmup ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-8 gap-1.5 text-xs"
+            onClick={() => onManualWarmup(account.accountId)}
+            disabled={busy || readOnly || account.status !== "active"}
+            title={t("accounts.actions.manualWarmupHelp")}
+          >
+            <Flame className="h-3.5 w-3.5" />
+            {t("accounts.actions.manualWarmup")}
+          </Button>
+        ) : null}
 
         {canExport ? (
           <Button

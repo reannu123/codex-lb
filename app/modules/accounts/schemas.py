@@ -188,6 +188,18 @@ class AccountLimitWarmupUpdateResponse(DashboardModel):
     enabled: bool
 
 
+class AccountManualWarmupResponse(DashboardModel):
+    """A completed manual warm-up request. It does not confirm that a quota window started."""
+
+    account_id: str
+    attempt_id: int
+    request_id: str | None = None
+    status: str
+    model: str
+    attempted_at: datetime
+    completed_at: datetime | None = None
+
+
 class AccountRoutingPolicyUpdateRequest(DashboardModel):
     routing_policy: str = Field(pattern=r"^(normal|burn_first|preserve)$")
 
