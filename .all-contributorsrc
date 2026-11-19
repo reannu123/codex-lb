@@ -1562,6 +1562,24 @@
         "test",
         "doc"
       ]
+    },
+    {
+      "login": "ale-benassi",
+      "name": "ale-benassi",
+      "avatar_url": "https://github.com/ale-benassi.png",
+      "profile": "https://github.com/ale-benassi",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "reannu123",
+      "name": "reannu123",
+      "avatar_url": "https://avatars.githubusercontent.com/u/54865395?v=4",
+      "profile": "https://github.com/reannu123",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "contributorsPerLine": 7,
