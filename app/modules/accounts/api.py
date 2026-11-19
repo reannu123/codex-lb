@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, Request, Response
 
@@ -24,10 +25,6 @@ from app.core.multipart import ACCOUNT_IMPORT_MULTIPART_POLICY, bounded_multipar
 from app.core.multipart_fields import required_upload
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.db.models import AccountStatus
-from app.modules.limit_warmup.repository import LimitWarmupRepository
-from app.modules.limit_warmup.service import LimitWarmupService, StreamingLimitWarmupSender
-from app.modules.request_logs.repository import RequestLogsRepository
-from app.modules.settings.repository import SettingsRepository
 from app.dependencies import AccountsContext, get_accounts_context, get_proxy_service_for_app
 from app.modules.accounts.repository import AccountIdentityConflictError
 from app.modules.accounts.schemas import (
@@ -60,6 +57,10 @@ from app.modules.accounts.service import (
     AccountUsageResetCreditsUnavailableError,
     InvalidAuthJsonError,
 )
+from app.modules.limit_warmup.repository import LimitWarmupRepository
+from app.modules.limit_warmup.service import LimitWarmupService, StreamingLimitWarmupSender
+from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.settings.repository import SettingsRepository
 
 logger = logging.getLogger(__name__)
 
@@ -417,7 +418,7 @@ async def manual_account_limit_warmup(
     settings = await SettingsRepository(context.session).get_or_create()
     service = LimitWarmupService(
         LimitWarmupRepository(context.session),
-        RequestLogsRepository(context.session),
+        cast(Any, RequestLogsRepository(context.session)),
         sender=StreamingLimitWarmupSender(context.repository),
     )
     try:

@@ -1665,7 +1665,9 @@ async def test_sliding_idle_resets_claim_once_per_stable_cycle(monkeypatch) -> N
             accounts=[selected],
             stagger_accounts=accounts,
             stagger_primary={
-                accounts[0].id: _usage(accounts[0].id, used_percent=0, reset_at=current + 18_000, recorded_at=observed_at),
+                accounts[0].id: _usage(
+                    accounts[0].id, used_percent=0, reset_at=current + 18_000, recorded_at=observed_at
+                ),
                 selected.id: primary,
             },
             settings=_settings(limit_warmup_staggered_idle_enabled=True),
