@@ -1,36 +1,139 @@
 name: Publish fork test image
 
-# Intentionally manual to avoid extra CI minutes and unreviewed GHCR pushes.
-# Once this workflow exists on the default branch, use Actions > Run workflow
-# and select the tested ref. Uses the selected ref, not an untrusted PR context.
+# Publishes a test image for the staggered/manual warm-up branch only after the
+# CI run for the exact pushed commit has succeeded. workflow_run and
+# workflow_dispatch only fire for workflows on the default branch, so this
+# branch-scoped workflow triggers on push and gates itself on CI instead.
+# Re-run a gated run from the Actions tab once CI has finished if it timed out.
 on:
-  workflow_dispatch:
+  push:
+    branches: ["fix/staggered-idle-manual-warmup"]
 
-permissions:
-  contents: read
-  packages: write
+permissions: {}
+
+concurrency:
+  group: fork-test-image-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  publish-test-image:
+  ci-gate:
+    name: Wait for green CI on this commit
+    if: github.repository == 'reannu123/codex-lb'
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      actions: read
+      contents: read
     steps:
-      - name: Check out selected ref
-        uses: actions/checkout@v4
+      - name: Require the tested tree to equal this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          # Pull-request CI tests the merge of the head into main. The trees
+          # are identical only when the head already contains main's tip.
+          behind=$(gh api "repos/${REPO}/compare/main...${SHA}" --jq '.behind_by')
+          if [ "${behind}" != "0" ]; then
+            echo "::error::${SHA} is ${behind} commit(s) behind main; rebase so CI tests this exact tree."
+            exit 1
+          fi
+
+      - name: Wait for the CI workflow run on this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          deadline=$(( $(date +%s) + 110 * 60 ))
+          while :; do
+            run=$(gh api "repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${SHA}&event=pull_request&per_page=1" \
+              --jq '.workflow_runs[0] | select(. != null) | "\(.id) \(.status) \(.conclusion)"')
+            if [ -n "${run}" ]; then
+              read -r run_id status conclusion <<<"${run}"
+              echo "CI run ${run_id}: status=${status} conclusion=${conclusion}"
+              if [ "${status}" = "completed" ]; then
+                if [ "${conclusion}" = "success" ]; then
+                  echo "CI succeeded for ${SHA}."
+                  exit 0
+                fi
+                echo "::error::CI run ${run_id} for ${SHA} concluded ${conclusion}; not publishing."
+                exit 1
+              fi
+            else
+              echo "No pull_request CI run for ${SHA} yet."
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::Timed out waiting for CI on ${SHA}."
+              exit 1
+            fi
+            sleep 60
+          done
+
+  publish:
+    name: Build and push test image
+    needs: ci-gate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out the tested commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Resolve image name
+        id: image
+        env:
+          REPO: ${{ github.repository }}
+        run: echo "name=ghcr.io/${REPO,,}" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+
       - name: Authenticate to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and publish test image (amd64)
-        uses: docker/build-push-action@v6
+
+      # Explicit tags only: an immutable per-commit tag and the moving test
+      # tag. This workflow never pushes `latest` or a release tag.
+      - name: Build and push (linux/amd64)
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         with:
           context: .
           file: Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/${{ github.repository }}:staggered-warmup-test
-          cache-from: type=gha,scope=fork-staggered-warmup
-          cache-to: type=gha,mode=max,scope=fork-staggered-warmup
+          provenance: false
+          tags: |
+            ${{ steps.image.outputs.name }}:sha-${{ github.sha }}
+            ${{ steps.image.outputs.name }}:staggered-warmup-test
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Verify the image ships the built dashboard
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}:sha-${{ github.sha }}
+        run: |
+          docker pull "${IMAGE}"
+          docker run --rm --entrypoint sh "${IMAGE}" -c 'test -f /app/app/static/index.html && ls /app/app/static | head'
+
+      - name: Summary
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          SHA: ${{ github.sha }}
+        run: |
+          {
+            echo "### Test image"
+            echo "- \`${IMAGE}:sha-${SHA}\`"
+            echo "- \`${IMAGE}:staggered-warmup-test\`"
+            echo "- digest: \`${DIGEST}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
