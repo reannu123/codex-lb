@@ -13,6 +13,7 @@ import {
   getRateLimitResetCredits,
   importAccount,
   listAccounts,
+  manuallyWarmupAccount,
   pauseAccount,
   probeAccount,
   reactivateAccount,
@@ -182,6 +183,19 @@ export function useAccountMutations() {
     },
   });
 
+  const manualWarmupMutation = useMutation({
+    mutationFn: manuallyWarmupAccount,
+    // A 2xx means the upstream request completed, not that a quota window started.
+    onSuccess: (_result, accountId) => {
+      toast.success(t("accounts.toasts.manualWarmupSucceeded"));
+      void invalidateAccountRelatedQueries(queryClient, accountId);
+    },
+    onError: (error: Error, accountId) => {
+      toast.error(error.message || t("accounts.toasts.manualWarmupFailed"));
+      void invalidateAccountRelatedQueries(queryClient, accountId);
+    },
+  });
+
   const routingPolicyMutation = useMutation({
     mutationFn: ({
       accountId,
@@ -252,6 +266,7 @@ export function useAccountMutations() {
     usageResetMutation,
     exportAuthMutation,
     limitWarmupMutation,
+    manualWarmupMutation,
     routingPolicyMutation,
     updateMutation,
     resetCreditConsumeMutation,

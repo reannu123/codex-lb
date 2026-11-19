@@ -13,6 +13,7 @@ from app.core.usage import refresh_scheduler as refresh_scheduler_module
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import SessionLocal
+from app.modules.accounts.background_repository import detached_accounts_repo
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.limit_warmup.service import LimitWarmupSendResult
@@ -53,7 +54,7 @@ async def test_background_accounts_repo_keeps_loaded_account_usable_after_contex
     async with SessionLocal() as session:
         await AccountsRepository(session).upsert(account)
 
-    async with refresh_scheduler_module._background_accounts_repo() as accounts_repo:
+    async with detached_accounts_repo() as accounts_repo:
         loaded = await accounts_repo.get_by_id_fresh(account.id)
 
     assert loaded is not None

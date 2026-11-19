@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 
 from app.db.models import Account, AccountStatus
@@ -7,6 +9,16 @@ from app.db.session import detach_session_objects, get_background_session
 from app.modules.accounts.repository import AccountsRepository
 
 _UNSET = object()
+
+
+@asynccontextmanager
+async def detached_accounts_repo() -> AsyncIterator[AccountsRepository]:
+    """Yield a repository on its own background session; loaded accounts stay usable after exit."""
+    async with get_background_session() as session:
+        try:
+            yield AccountsRepository(session)
+        finally:
+            detach_session_objects(session)
 
 
 class BackgroundAccountsRepository:

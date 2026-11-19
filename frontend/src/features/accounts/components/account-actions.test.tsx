@@ -7,6 +7,61 @@ import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { ADMIN_PERMISSIONS, OPERATOR_PERMISSIONS, createAccountSummary } from "@/test/mocks/factories";
 
 describe("AccountActions", () => {
+  function renderWithManualWarmup(
+    account: ReturnType<typeof createAccountSummary>,
+    onManualWarmup = vi.fn(),
+    overrides: { busy?: boolean; readOnly?: boolean } = {},
+  ) {
+    render(
+      <AccountActions
+        account={account}
+        busy={overrides.busy ?? false}
+        readOnly={overrides.readOnly}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onProbe={vi.fn()}
+        onDelete={vi.fn()}
+        onReauth={vi.fn()}
+        onExportAuth={vi.fn()}
+        onResetCredit={vi.fn()}
+        onSecurityWorkAuthorizedChange={vi.fn()}
+        onLimitWarmupChange={vi.fn()}
+        onManualWarmup={onManualWarmup}
+        onRoutingPolicyChange={vi.fn()}
+      />,
+    );
+    return onManualWarmup;
+  }
+
+  it.each([true, false])(
+    "offers manual warm-up for an active account regardless of auto warm-up (enabled=%s)",
+    async (limitWarmupEnabled) => {
+      const account = createAccountSummary({ status: "active", limitWarmupEnabled });
+      const onManualWarmup = renderWithManualWarmup(account);
+
+      const button = screen.getByRole("button", { name: "Warm up now" });
+      expect(button).toBeEnabled();
+      await userEvent.setup().click(button);
+      expect(onManualWarmup).toHaveBeenCalledWith(account.accountId);
+    },
+  );
+
+  it.each(["paused", "rate_limited", "quota_exceeded", "deactivated"] as const)(
+    "disables manual warm-up for a %s account",
+    (status) => {
+      renderWithManualWarmup(createAccountSummary({ status, limitWarmupEnabled: true }));
+      expect(screen.getByRole("button", { name: "Warm up now" })).toBeDisabled();
+    },
+  );
+
+  it.each([
+    ["read-only", { readOnly: true }],
+    ["busy", { busy: true }],
+  ])("disables manual warm-up while %s", (_label, overrides) => {
+    renderWithManualWarmup(createAccountSummary({ status: "active" }), vi.fn(), overrides);
+    expect(screen.getByRole("button", { name: "Warm up now" })).toBeDisabled();
+  });
+
   it.each([
     ["shows", ADMIN_PERMISSIONS, true],
     ["hides", OPERATOR_PERMISSIONS, false],

@@ -64,7 +64,9 @@ Each signal needs at least eight samples on at least three accounts (per model, 
 
 ### Limit warm-up
 
-Limit warm-up sends **one small real request** (using the configured warm-up model and prompt) to an opted-in account when one of its quota windows is confirmed to have newly reset, verifying that the account responds. It consumes a small amount of quota. The optional staggered idle mode additionally pre-starts the 5h window of idle opted-in accounts before traffic arrives; the configured cooldown applies to these staggered idle probes, while ordinary reset-confirmed probes fire once per confirmed reset. Accounts opt in individually (`Enable warm-up` in account actions); the last attempt's result, model, and time are shown on the account list entry.
+Limit warm-up sends **one small real request** (using the configured warm-up model and prompt) to an opted-in account when one of its quota windows is confirmed to have newly reset, verifying that the account responds. It consumes a small amount of quota. The optional staggered idle mode additionally pre-starts the 5h window of idle opted-in accounts whose window has not started, at evenly spaced slots on a fixed UTC grid (two accounts end up about 2.5 hours apart). It never touches a window that is already running, and it ignores weekly-only accounts. The configured cooldown applies to these staggered idle probes, while ordinary reset-confirmed probes fire once per confirmed reset. Accounts opt in individually (`Enable warm-up` in account actions); the last attempt's result, model, and time are shown on the account list entry.
+
+`Warm up now` in account actions sends one confirmed warm-up request to that account only. It works for any active account, even one not opted in, and is limited to once per account every five minutes. A successful request does not confirm that a quota window started; check the account's usage after the next refresh.
 
 ---
 

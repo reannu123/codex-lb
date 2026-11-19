@@ -1100,6 +1100,38 @@ export const handlers = [
     },
   ),
 
+  http.post("/api/accounts/:accountId/limit-warmup/manual", ({ params }) => {
+    const accountId = String(params.accountId);
+    const account = findAccount(accountId);
+    if (!account) {
+      return HttpResponse.json(
+        { error: { code: "account_not_found", message: "Account not found" } },
+        { status: 404 },
+      );
+    }
+    if (account.status !== "active") {
+      return HttpResponse.json(
+        {
+          error: {
+            code: "manual_warmup_account_not_active",
+            message: "Manual warm-up requires an active account",
+          },
+        },
+        { status: 409 },
+      );
+    }
+    const now = new Date().toISOString();
+    return HttpResponse.json({
+      accountId,
+      attemptId: 1,
+      requestId: "limit-warmup-mock",
+      status: "succeeded",
+      model: "gpt-5.1-codex-mini",
+      attemptedAt: now,
+      completedAt: now,
+    });
+  }),
+
   http.put(
     "/api/accounts/:accountId/routing-policy",
     async ({ params, request }) => {
