@@ -185,16 +185,14 @@ export function useAccountMutations() {
 
   const manualWarmupMutation = useMutation({
     mutationFn: manuallyWarmupAccount,
-    onSuccess: (result, accountId) => {
-      if (result.status === "succeeded") {
-        toast.success(t("accounts.toasts.manualWarmupSucceeded"));
-      } else {
-        toast.error(result.errorMessage || t("accounts.toasts.manualWarmupFailed"));
-      }
+    // A 2xx means the upstream request completed, not that a quota window started.
+    onSuccess: (_result, accountId) => {
+      toast.success(t("accounts.toasts.manualWarmupSucceeded"));
       void invalidateAccountRelatedQueries(queryClient, accountId);
     },
-    onError: (error: Error) => {
+    onError: (error: Error, accountId) => {
       toast.error(error.message || t("accounts.toasts.manualWarmupFailed"));
+      void invalidateAccountRelatedQueries(queryClient, accountId);
     },
   });
 

@@ -129,7 +129,7 @@ export function AccountsPage() {
     probeMutation.isPending ||
     usageResetMutation.isPending ||
     limitWarmupMutation.isPending ||
-    (manualWarmupMutation?.isPending ?? false) ||
+    manualWarmupMutation.isPending ||
     deleteMutation.isPending ||
     routingPolicyMutation.isPending ||
     exportAuthMutation.isPending ||
@@ -145,7 +145,7 @@ export function AccountsPage() {
     getErrorMessageOrNull(probeMutation.error) ||
     getErrorMessageOrNull(usageResetMutation.error) ||
     getErrorMessageOrNull(limitWarmupMutation.error) ||
-    getErrorMessageOrNull(manualWarmupMutation?.error) ||
+    getErrorMessageOrNull(manualWarmupMutation.error) ||
     getErrorMessageOrNull(deleteMutation.error) ||
     getErrorMessageOrNull(routingPolicyMutation.error) ||
     getErrorMessageOrNull(exportAuthMutation.error) ||
@@ -317,9 +317,12 @@ export function AccountsPage() {
         onOpenChange={manualWarmupDialog.onOpenChange}
         onConfirm={() => {
           if (!manualWarmupDialog.data) return;
-          void manualWarmupMutation.mutateAsync(manualWarmupDialog.data)
-            .catch(() => null)
-            .finally(() => manualWarmupDialog.hide());
+          void manualWarmupMutation
+            .mutateAsync(manualWarmupDialog.data)
+            .catch(() => undefined)
+            .finally(() => {
+              manualWarmupDialog.hide();
+            });
         }}
       />
 

@@ -215,7 +215,7 @@ export function AccountActions({
             variant="outline"
             className="h-8 gap-1.5 text-xs"
             onClick={() => onManualWarmup(account.accountId)}
-            disabled={busy || readOnly || !account.limitWarmupEnabled || account.status !== "active"}
+            disabled={busy || readOnly || account.status !== "active"}
             title={t("accounts.actions.manualWarmupHelp")}
           >
             <Flame className="h-3.5 w-3.5" />

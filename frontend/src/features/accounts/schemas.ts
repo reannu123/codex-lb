@@ -251,11 +251,12 @@ export const AccountLimitWarmupUpdateRequestSchema = z.object({
 
 export const AccountManualWarmupResponseSchema = z.object({
   accountId: z.string(),
+  attemptId: z.number(),
+  requestId: z.string().nullable().optional(),
   status: z.string(),
   model: z.string(),
   attemptedAt: z.string(),
-  errorCode: z.string().nullable().optional(),
-  errorMessage: z.string().nullable().optional(),
+  completedAt: z.string().nullable().optional(),
 });
 
 export const AccountLimitWarmupUpdateResponseSchema = z.object({
