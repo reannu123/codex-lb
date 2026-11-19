@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_background_session, get_session
 from app.modules.accounts.auth_manager import AuthManager
+from app.modules.accounts.background_repository import detached_accounts_repo
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import AccountsService
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -35,6 +36,7 @@ from app.modules.dashboard_users.service import DashboardUsersService
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.limit_warmup.repository import LimitWarmupRepository
+from app.modules.limit_warmup.service import LimitWarmupService, StreamingLimitWarmupSender
 from app.modules.model_sources.repository import ModelSourcesRepository
 from app.modules.model_sources.service import ModelSourcesService
 from app.modules.oauth.service import OauthService
@@ -252,6 +254,35 @@ def get_usage_context(
         session=session,
         usage_repository=usage_repository,
         service=service,
+    )
+
+
+@dataclass(slots=True)
+class ManualLimitWarmupContext:
+    session: AsyncSession
+    settings_repository: SettingsRepository
+    service: LimitWarmupService
+
+
+def get_manual_limit_warmup_context(
+    session: AsyncSession = Depends(get_session),
+) -> ManualLimitWarmupContext:
+    # Attempt claims and request logs run sequentially on the request session.
+    # Token refresh and upstream-route resolution use their own sessions so
+    # the request session is idle (no open write) during upstream I/O.
+    sender = StreamingLimitWarmupSender(
+        AccountsRepository(session),
+        accounts_repo_factory=detached_accounts_repo,
+        require_limit_warmup_opt_in=False,
+    )
+    return ManualLimitWarmupContext(
+        session=session,
+        settings_repository=SettingsRepository(session),
+        service=LimitWarmupService(
+            LimitWarmupRepository(session),
+            RequestLogsRepository(session),
+            sender=sender,
+        ),
     )
 
 

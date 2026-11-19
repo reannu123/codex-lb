@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, cast
 
 from fastapi import APIRouter, Depends, Request, Response
 
@@ -24,8 +23,13 @@ from app.core.middleware.multipart_content_encoding import raise_for_unsupported
 from app.core.multipart import ACCOUNT_IMPORT_MULTIPART_POLICY, bounded_multipart_form, read_bounded_upload
 from app.core.multipart_fields import required_upload
 from app.core.upstream_proxy import UpstreamProxyRouteError
-from app.db.models import AccountStatus
-from app.dependencies import AccountsContext, get_accounts_context, get_proxy_service_for_app
+from app.dependencies import (
+    AccountsContext,
+    ManualLimitWarmupContext,
+    get_accounts_context,
+    get_manual_limit_warmup_context,
+    get_proxy_service_for_app,
+)
 from app.modules.accounts.repository import AccountIdentityConflictError
 from app.modules.accounts.schemas import (
     AccountAliasRequest,
@@ -57,10 +61,7 @@ from app.modules.accounts.service import (
     AccountUsageResetCreditsUnavailableError,
     InvalidAuthJsonError,
 )
-from app.modules.limit_warmup.repository import LimitWarmupRepository
-from app.modules.limit_warmup.service import LimitWarmupService, StreamingLimitWarmupSender
-from app.modules.request_logs.repository import RequestLogsRepository
-from app.modules.settings.repository import SettingsRepository
+from app.modules.limit_warmup.service import ManualWarmupUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -405,45 +406,45 @@ async def manual_account_limit_warmup(
     account_id: str,
     principal: DashboardPrincipal = Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE)),
     context: AccountsContext = Depends(get_accounts_context),
+    warmup_context: ManualLimitWarmupContext = Depends(get_manual_limit_warmup_context),
 ) -> AccountManualWarmupResponse:
-    """Send one bounded manual warm-up to the selected account, not the load balancer."""
+    """Send one warm-up request pinned to the selected account; never routed through the load balancer."""
     account = await context.repository.get_by_id(account_id)
     if account is None or account.delete_requested_at is not None:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
-    if account.status != AccountStatus.ACTIVE or not account.limit_warmup_enabled:
-        raise DashboardConflictError(
-            "Manual warm-up requires an active account with warm-up enabled",
-            code="manual_warmup_unavailable",
-        )
-    settings = await SettingsRepository(context.session).get_or_create()
-    service = LimitWarmupService(
-        LimitWarmupRepository(context.session),
-        cast(Any, RequestLogsRepository(context.session)),
-        sender=StreamingLimitWarmupSender(context.repository),
-    )
+    settings = await warmup_context.settings_repository.get_or_create()
     try:
-        attempt = await service.run_manual_warmup(account=account, settings=settings)
-    except ValueError as exc:
-        raise DashboardConflictError(str(exc), code="manual_warmup_unavailable") from exc
-    if attempt is None:
-        raise DashboardConflictError(
-            "A manual warm-up was already requested for this account in the current five-minute interval",
-            code="manual_warmup_cooldown",
-        )
+        result = await warmup_context.service.run_manual_warmup(account=account, settings=settings)
+    except ManualWarmupUnavailableError as exc:
+        raise DashboardConflictError(exc.message, code=exc.code) from exc
+    attempt = result.attempt
     AuditService.log_async(
         "account_manual_warmup",
         actor_ip=request.client.host if request.client else None,
         actor=AuditActor.from_principal(principal),
         target=AuditTarget("account", account_id),
-        details={"account_id": account_id, "attempt_id": attempt.id, "status": attempt.status, "model": attempt.model},
+        details={
+            "account_id": account_id,
+            "attempt_id": attempt.id,
+            "request_id": result.request_id,
+            "status": attempt.status,
+            "model": attempt.model,
+            "error_code": attempt.error_code,
+        },
     )
+    if not result.succeeded:
+        raise DashboardUpstreamError(
+            attempt.error_message or "Manual warm-up request failed",
+            code="manual_warmup_failed",
+        )
     return AccountManualWarmupResponse(
         account_id=account_id,
+        attempt_id=attempt.id,
+        request_id=result.request_id,
         status=attempt.status,
         model=attempt.model,
         attempted_at=attempt.attempted_at,
-        error_code=attempt.error_code,
-        error_message=attempt.error_message,
+        completed_at=attempt.completed_at,
     )
 
 

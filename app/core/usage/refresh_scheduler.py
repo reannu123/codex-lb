@@ -7,7 +7,7 @@ import time
 from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Protocol, cast
+from typing import Any, Protocol, cast
 
 from app.core.balancer.logic import RATE_LIMITED_MIN_COOLDOWN_SECONDS
 from app.core.plan_types import normalize_account_plan_type
@@ -18,12 +18,13 @@ from app.core.usage.refresh_policy import USAGE_REFRESH_INTERVAL_SECONDS
 from app.core.utils.time import naive_utc_to_epoch
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, UsageHistory
 from app.db.session import detach_session_objects, get_background_session
-from app.modules.accounts.background_repository import BackgroundAccountsRepository
+from app.modules.accounts.background_repository import BackgroundAccountsRepository, detached_accounts_repo
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.limit_warmup.service import (
     LimitWarmupService,
     StreamingLimitWarmupSender,
+    stagger_short_window_eligible,
     usage_reset_confirmed,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache
@@ -125,6 +126,7 @@ class _BackgroundLimitWarmupRepository:
         status: str = "pending",
         reset_at_tolerance_seconds: int = 0,
         require_no_prior_attempt: bool = False,
+        blocking_statuses: tuple[str, ...] | None = None,
     ) -> AccountLimitWarmup | None:
         async with get_background_session() as session:
             attempt = await LimitWarmupRepository(session).try_create_attempt(
@@ -136,6 +138,7 @@ class _BackgroundLimitWarmupRepository:
                 status=status,
                 reset_at_tolerance_seconds=reset_at_tolerance_seconds,
                 require_no_prior_attempt=require_no_prior_attempt,
+                blocking_statuses=blocking_statuses,
             )
             detach_session_objects(session)
             return attempt
@@ -175,6 +178,11 @@ class UsageRefreshScheduler:
     _task: asyncio.Task[None] | None = None
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Short-window stagger eligibility per account, learned only from each
+    # account's own slice so a slice never reads another account's usage.
+    # Unknown accounts (for example right after a restart) hold the stagger
+    # until the rotation has observed them.
+    _stagger_short_window_eligibility: dict[str, bool] = field(default_factory=dict)
 
     async def start(self) -> None:
         if not self.enabled:
@@ -239,6 +247,11 @@ class UsageRefreshScheduler:
                         )
                     detach_session_objects(session)
                 account_count = len(accounts)
+                self._remember_stagger_eligibility(
+                    roster=accounts,
+                    selected_account=selected_account,
+                    latest_primary=before_primary if selected_account is not None else {},
+                )
                 if selected_account is None:
                     await _invalidate_usage_refresh_caches()
                     return float(self.interval_seconds)
@@ -265,10 +278,6 @@ class UsageRefreshScheduler:
                         )
                         dashboard_settings = await settings_repo.get_or_create()
                         refreshed_accounts = await accounts_repo.list_accounts(refresh_existing=True)
-                        stagger_primary = await usage_repo.latest_by_account(
-                            window="primary",
-                            account_ids=[account.id for account in refreshed_accounts],
-                        )
                         refreshed_selected_accounts = [
                             account for account in refreshed_accounts if account.id == selected_account.id
                         ]
@@ -279,6 +288,11 @@ class UsageRefreshScheduler:
                             after_monthly=after_monthly,
                         )
                         detach_session_objects(session)
+                    self._remember_stagger_eligibility(
+                        roster=accounts,
+                        selected_account=selected_account,
+                        latest_primary=after_primary,
+                    )
                     warmup_before_monthly = dict(before_monthly)
                     warmup_after_monthly = dict(after_monthly)
                     for account_id, account_evidence in resolved.warmup.items():
@@ -297,13 +311,13 @@ class UsageRefreshScheduler:
                         cast(Any, _BackgroundRequestLogsRepository()),
                         sender=StreamingLimitWarmupSender(
                             cast(AccountsRepository, BackgroundAccountsRepository()),
-                            accounts_repo_factory=_background_accounts_repo,
+                            accounts_repo_factory=detached_accounts_repo,
                         ),
                     )
                     await warmup_service.run_after_usage_refresh(
                         accounts=refreshed_selected_accounts,
                         stagger_accounts=refreshed_accounts,
-                        stagger_primary=stagger_primary,
+                        stagger_short_window_eligibility=dict(self._stagger_short_window_eligibility),
                         settings=dashboard_settings,
                         before_primary=before_primary,
                         before_secondary=_select_long_window_entries(
@@ -327,6 +341,22 @@ class UsageRefreshScheduler:
                 logger.exception("Usage refresh loop failed")
                 return float(self.interval_seconds)
         return _usage_refresh_slice_seconds(self.interval_seconds, account_count)
+
+    def _remember_stagger_eligibility(
+        self,
+        *,
+        roster: list[Account],
+        selected_account: Account | None,
+        latest_primary: dict[str, UsageHistory],
+    ) -> None:
+        roster_ids = {account.id for account in roster}
+        for account_id in list(self._stagger_short_window_eligibility):
+            if account_id not in roster_ids:
+                del self._stagger_short_window_eligibility[account_id]
+        if selected_account is not None:
+            self._stagger_short_window_eligibility[selected_account.id] = stagger_short_window_eligible(
+                latest_primary.get(selected_account.id)
+            )
 
     def _select_next_account(self, accounts: list[Account]) -> tuple[Account | None, bool]:
         if not accounts:
@@ -362,15 +392,6 @@ def _usage_refresh_slice_seconds(interval_seconds: int, account_count: int) -> f
 async def _invalidate_usage_refresh_caches() -> None:
     await get_rate_limit_headers_cache().invalidate()
     get_account_selection_cache().invalidate()
-
-
-@contextlib.asynccontextmanager
-async def _background_accounts_repo() -> AsyncIterator[AccountsRepository]:
-    async with get_background_session() as session:
-        try:
-            yield AccountsRepository(session)
-        finally:
-            detach_session_objects(session)
 
 
 async def reconcile_recoverable_account_statuses(
