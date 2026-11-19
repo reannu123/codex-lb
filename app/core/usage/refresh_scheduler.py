@@ -109,9 +109,11 @@ class _LatestUsageRepository(Protocol):
 
 
 class _BackgroundLimitWarmupRepository:
-    async def latest_by_account(self, account_ids: list[str]) -> dict[str, AccountLimitWarmup]:
+    async def latest_by_account(
+        self, account_ids: list[str], *, window: str | None = None
+    ) -> dict[str, AccountLimitWarmup]:
         async with get_background_session() as session:
-            attempts = await LimitWarmupRepository(session).latest_by_account(account_ids)
+            attempts = await LimitWarmupRepository(session).latest_by_account(account_ids, window=window)
             detach_session_objects(session)
             return attempts
 

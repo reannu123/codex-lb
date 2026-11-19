@@ -18,9 +18,14 @@ class LimitWarmupRepository:
         bind = self._session.get_bind()
         return bind.dialect.name if bind else "sqlite"
 
-    async def latest_by_account(self, account_ids: list[str]) -> dict[str, AccountLimitWarmup]:
+    async def latest_by_account(
+        self, account_ids: list[str], *, window: str | None = None
+    ) -> dict[str, AccountLimitWarmup]:
         if not account_ids:
             return {}
+        conditions = [AccountLimitWarmup.account_id.in_(account_ids)]
+        if window is not None:
+            conditions.append(AccountLimitWarmup.window == window)
         subq = (
             select(
                 AccountLimitWarmup.id.label("warmup_id"),
@@ -31,7 +36,7 @@ class LimitWarmupRepository:
                 )
                 .label("row_number"),
             )
-            .where(AccountLimitWarmup.account_id.in_(account_ids))
+            .where(*conditions)
             .subquery()
         )
         stmt = (

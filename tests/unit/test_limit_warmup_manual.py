@@ -290,3 +290,25 @@ async def test_streaming_sender_pins_the_selected_account(
     assert upstream_payload["store"] is False
     # The Codex Responses endpoint rejects max_output_tokens; it must be stripped.
     assert "max_output_tokens" not in upstream_payload
+
+
+@pytest.mark.asyncio
+async def test_retry_after_failure_is_keyed_off_the_last_manual_attempt(clock: list[int]) -> None:
+    """An automatic attempt between a failed manual attempt and its retry must not cause a collision."""
+    repo = FakeWarmupRepo()
+    account = _account()
+
+    failed = await _service(FakeSender(success=False, error_code="server_error"), repo).run_manual_warmup(
+        account=account, settings=_settings()
+    )
+    scheduled = await repo.try_create_attempt(
+        account_id=account.id, window="primary_idle", reset_at=123, model="m", attempted_at=_at(clock[0])
+    )
+    assert scheduled is not None
+    await repo.complete_attempt(scheduled.id, status="succeeded", completed_at=_at(clock[0]))
+
+    retried = await _service(FakeSender(), repo).run_manual_warmup(account=account, settings=_settings())
+
+    assert failed.succeeded is False
+    assert retried.succeeded is True
+    assert retried.attempt.reset_at == failed.attempt.reset_at + 1

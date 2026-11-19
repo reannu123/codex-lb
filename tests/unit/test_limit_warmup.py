@@ -82,11 +82,13 @@ class FakeWarmupRepo:
         self.next_id = 1
         self.latest_requests: list[list[str]] = []
 
-    async def latest_by_account(self, account_ids: list[str]) -> dict[str, AccountLimitWarmup]:
+    async def latest_by_account(
+        self, account_ids: list[str], *, window: str | None = None
+    ) -> dict[str, AccountLimitWarmup]:
         self.latest_requests.append(list(account_ids))
         result: dict[str, AccountLimitWarmup] = {}
         for row in self.rows:
-            if row.account_id in account_ids:
+            if row.account_id in account_ids and (window is None or row.window == window):
                 current = result.get(row.account_id)
                 if current is None or row.attempted_at > current.attempted_at:
                     result[row.account_id] = row
