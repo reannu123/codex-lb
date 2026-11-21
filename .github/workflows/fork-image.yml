@@ -19,8 +19,10 @@ permissions: {}
 jobs:
   resolve:
     name: Resolve the tested main commit
+    # Immutable repository ID of reannu123/switchboard (formerly
+    # reannu123/codex-lb): survives renames, never matches upstream or forks.
     if: >-
-      github.repository == 'reannu123/codex-lb' &&
+      github.repository_id == '1464401554' &&
       (github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
@@ -89,11 +91,11 @@ jobs:
           ref: ${{ needs.resolve.outputs.sha }}
           persist-credentials: false
 
+      # The package name is fixed and deliberately not derived from the
+      # repository name, which changed in the rename to switchboard.
       - name: Resolve image name
         id: image
-        env:
-          REPO: ${{ github.repository }}
-        run: echo "name=ghcr.io/${REPO,,}" >> "$GITHUB_OUTPUT"
+        run: echo "name=ghcr.io/reannu123/codex-lb" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069

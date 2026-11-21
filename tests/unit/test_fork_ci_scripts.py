@@ -125,3 +125,36 @@ def test_every_focused_integration_target_exists() -> None:
     assert targets
     missing = [target for target in targets if not (ROOT / target).is_file()]
     assert missing == []
+
+
+def _fork_image_workflow() -> dict:
+    import yaml
+
+    return yaml.safe_load((ROOT / ".github" / "workflows" / "fork-image.yml").read_text())
+
+
+def test_fork_image_publishes_only_for_this_repository_by_immutable_id() -> None:
+    workflow = _fork_image_workflow()
+    condition = " ".join(str(workflow["jobs"]["resolve"]["if"]).split())
+    # The fork's immutable repository ID survives renames (codex-lb -> switchboard).
+    assert condition.startswith("github.repository_id == '1464401554' && (")
+    assert "github.repository ==" not in condition
+    assert workflow["jobs"]["publish"]["if"] == "needs.resolve.outputs.qualified == 'true'"
+
+
+def test_fork_image_package_name_is_fixed_not_derived_from_repository() -> None:
+    workflow = _fork_image_workflow()
+    steps = {step.get("name"): step for step in workflow["jobs"]["publish"]["steps"]}
+    resolve = steps["Resolve image name"]
+    assert resolve["run"].strip() == 'echo "name=ghcr.io/reannu123/codex-lb" >> "$GITHUB_OUTPUT"'
+    assert "env" not in resolve
+    text = (ROOT / ".github" / "workflows" / "fork-image.yml").read_text()
+    assert "${REPO,,}" not in text
+    assert ":latest" not in text
+
+
+def test_fork_image_permissions_are_not_broadened() -> None:
+    workflow = _fork_image_workflow()
+    assert workflow["permissions"] == {}
+    assert workflow["jobs"]["resolve"]["permissions"] == {"actions": "read", "contents": "read"}
+    assert workflow["jobs"]["publish"]["permissions"] == {"contents": "read", "packages": "write"}
