@@ -1,0 +1,141 @@
+name: Fork image
+
+# Publishes the fork's compatibility image from fork `main` (see
+# .github/FORK_POLICY.md). It runs only after "Fork CI" succeeded for a push to
+# main, builds that exact commit with the repository Dockerfile, boots it,
+# requires /health/ready, enforces the blocking Trivy CRITICAL/HIGH gate, and
+# only then pushes. Tags: immutable `sha-<full sha>` and moving `fork-main`.
+# It never pushes `latest` or release tags.
+on:
+  workflow_run:
+    workflows: ["Fork CI"]
+    types: [completed]
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: fork-image-main
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve the tested main commit
+    if: >-
+      github.repository == 'reannu123/codex-lb' &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'))
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - name: Require a successful Fork CI push run on main for the commit
+        id: sha
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            sha=$(gh api "repos/${REPO}/commits/main" --jq .sha)
+            conclusion=$(gh api "repos/${REPO}/actions/workflows/fork-ci.yml/runs?head_sha=${sha}&event=push&branch=main&per_page=1" \
+              --jq '.workflow_runs[0].conclusion // "missing"')
+            if [ "${conclusion}" != "success" ]; then
+              echo "::error::Fork CI on main ${sha} is '${conclusion}'; not publishing."
+              exit 1
+            fi
+          else
+            sha="${RUN_SHA}"
+          fi
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "Publishing tested main commit ${sha}"
+
+  publish:
+    name: Build, verify and push
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    env:
+      SHA: ${{ needs.resolve.outputs.sha }}
+    steps:
+      - name: Check out the tested commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+
+      - name: Resolve image name
+        id: image
+        env:
+          REPO: ${{ github.repository }}
+        run: echo "name=ghcr.io/${REPO,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+
+      - name: Build image (linux/amd64)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          provenance: false
+          tags: codex-lb:candidate
+          labels: |
+            org.opencontainers.image.revision=${{ needs.resolve.outputs.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Boot the container and wait for readiness
+        run: .github/fork/boot_and_probe.sh codex-lb:candidate
+
+      - name: Trivy CRITICAL/HIGH gate (blocking)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: codex-lb:candidate
+          format: table
+          exit-code: 1
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Authenticate to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push the verified image
+        id: push
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+        run: |
+          docker tag codex-lb:candidate "${IMAGE}:sha-${SHA}"
+          docker tag codex-lb:candidate "${IMAGE}:fork-main"
+          docker push "${IMAGE}:sha-${SHA}"
+          docker push "${IMAGE}:fork-main"
+          digest=$(docker inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:sha-${SHA}")
+          echo "digest=${digest#*@}" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "### Fork image"
+            echo "- \`${IMAGE}:sha-${SHA}\` (immutable)"
+            echo "- \`${IMAGE}:fork-main\` (moving)"
+            echo "- digest: \`${DIGEST}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
