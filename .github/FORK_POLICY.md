@@ -53,14 +53,16 @@ Upstream workflows stay in the tree unchanged, except that their root jobs carry
 `update-upstream-metadata`. Upstream behavior is therefore identical, and imports merge
 with at most one-line conflicts. Retired on the fork:
 
-- `ci.yml`, including contributor attribution, Helm, Nix, and the upstream Docker job
+- `ci.yml` except its OpenSpec job, including contributor attribution, Helm, Nix, and the
+  upstream Docker job
 - release guards, Release Please, beta release prepare and publish, and `release.yml`
 - the docs Pages deploy
 - issue and PR labelers
 - the stale bot
 - the Windows startup check
 
-Kept: `simplicity-budgets.yml` and the docs build (`mkdocs --strict`).
+Kept: `simplicity-budgets.yml`, the docs build (`mkdocs --strict`), and `ci.yml`'s
+`OpenSpec validation` job, which upstream requires to run unconditionally on every PR.
 
 The policy job in Fork CI fails when an upstream workflow job would run on the fork
 without being guarded or listed as kept in

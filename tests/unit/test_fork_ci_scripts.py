@@ -117,3 +117,11 @@ def test_changed_paths_are_raw_and_renames_select_both_sides(tmp_path: Path, mon
     areas.main()
     selected = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert selected == {"backend": "true", "frontend": "false", "rust": "false", "image": "false"}
+
+
+def test_every_focused_integration_target_exists() -> None:
+    listing = ROOT / ".github" / "fork" / "focused-integration-tests.txt"
+    targets = [line.strip() for line in listing.read_text().splitlines() if line.strip() and not line.startswith("#")]
+    assert targets
+    missing = [target for target in targets if not (ROOT / target).is_file()]
+    assert missing == []
