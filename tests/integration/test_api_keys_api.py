@@ -13,7 +13,7 @@ from typing import cast
 import pytest
 from fastapi.responses import JSONResponse
 from sqlalchemy import exc as sqlalchemy_exc
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 
 import app.core.clients.proxy as core_proxy_module
 import app.modules.api_keys.repository as api_keys_repository_module
@@ -551,6 +551,139 @@ async def test_concurrent_explicit_scope_saves_commit_only_one_baseline(async_cl
     assert saved["name"] == winning["name"]
     assert saved["accountAssignmentScopeEnabled"] == winning["accountAssignmentScopeEnabled"]
     assert saved["assignedAccountIds"] == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_scope_write_overwrites_mode_changed_after_row_read(async_client, monkeypatch):
+    first_id = await _import_account(async_client, "acc-scope-mode-first", "scope-mode-first@example.com")
+    second_id = await _import_account(async_client, "acc-scope-mode-second", "scope-mode-second@example.com")
+    created = await async_client.post("/api/api-keys/", json={"name": "scope-race", "assignedAccountIds": [first_id]})
+    assert created.status_code == 200
+    key_path = f"/api/api-keys/{created.json()['id']}"
+    row_read = asyncio.Event()
+    resume = asyncio.Event()
+    get_by_id = ApiKeysRepository.get_by_id
+    legacy_reads = 0
+
+    async def pause_after_legacy_row_read(self, key_id):
+        nonlocal legacy_reads
+        row = await get_by_id(self, key_id)
+        if asyncio.current_task() is legacy:
+            legacy_reads += 1
+            if legacy_reads == 2:
+                assert row is not None and row.account_assignment_scope_enabled
+                row_read.set()
+                await resume.wait()
+        return row
+
+    monkeypatch.setattr(ApiKeysRepository, "get_by_id", pause_after_legacy_row_read)
+    legacy = asyncio.create_task(async_client.patch(key_path, json={"assignedAccountIds": [second_id]}))
+    try:
+        await asyncio.wait_for(row_read.wait(), timeout=5)
+        unrestricted = await async_client.patch(
+            key_path,
+            json={
+                "accountScopeUpdate": {
+                    "accountAssignmentScopeEnabled": False,
+                    "assignedAccountIds": [],
+                    "expected": {"accountAssignmentScopeEnabled": True, "assignedAccountIds": [first_id]},
+                }
+            },
+        )
+        assert unrestricted.status_code == 200, unrestricted.text
+        assert unrestricted.json()["accountAssignmentScopeEnabled"] is False
+        resume.set()
+        written = await asyncio.wait_for(legacy, timeout=5)
+        assert written.status_code == 200, written.text
+        assert written.json()["accountAssignmentScopeEnabled"] is True
+        assert written.json()["assignedAccountIds"] == [second_id]
+        saved = (await async_client.get("/api/api-keys/")).json()[0]
+        assert saved["accountAssignmentScopeEnabled"] is True
+        assert saved["assignedAccountIds"] == [second_id]
+    finally:
+        if not legacy.done():
+            legacy.cancel()
+        await asyncio.gather(legacy, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_postgres_scope_and_limits_patch_can_wait_for_usage_reservation(async_client, monkeypatch):
+    async with SessionLocal() as session:
+        if session.get_bind().dialect.name != "postgresql":
+            pytest.skip("requires PostgreSQL row and foreign-key locks")
+
+    account_id = await _import_account(async_client, "acc-scope-reservation", "scope-reservation@example.com")
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "scope-reservation", "assignedAccountIds": [account_id], "weeklyTokenLimit": 100_000},
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+    limit_locked = asyncio.Event()
+    release_limit = asyncio.Event()
+    patch_pid = asyncio.get_running_loop().create_future()
+    try_reserve_usage = ApiKeysRepository.try_reserve_usage
+    upsert_limits = ApiKeysRepository.upsert_limits
+
+    async def hold_limit_after_reserving(self, *args, **kwargs):
+        result = await try_reserve_usage(self, *args, **kwargs)
+        assert result.success
+        limit_locked.set()
+        await release_limit.wait()
+        return result
+
+    async def identify_patch_writer(self, *args, **kwargs):
+        patch_pid.set_result(await self._session.scalar(text("SELECT pg_backend_pid()")))
+        return await upsert_limits(self, *args, **kwargs)
+
+    monkeypatch.setattr(ApiKeysRepository, "try_reserve_usage", hold_limit_after_reserving)
+    monkeypatch.setattr(ApiKeysRepository, "upsert_limits", identify_patch_writer)
+    async with SessionLocal() as admission, SessionLocal() as observer:
+        admission_pid = await admission.scalar(text("SELECT pg_backend_pid()"))
+        reserve = asyncio.create_task(
+            ApiKeysService(ApiKeysRepository(admission)).enforce_limits_for_request(key_id, request_model="gpt-5.4")
+        )
+        tasks = [reserve]
+        try:
+            await asyncio.wait_for(limit_locked.wait(), timeout=5)
+            patch = asyncio.create_task(
+                async_client.patch(
+                    f"/api/api-keys/{key_id}",
+                    json={
+                        "weeklyTokenLimit": 200_000,
+                        "accountScopeUpdate": {
+                            "accountAssignmentScopeEnabled": True,
+                            "assignedAccountIds": [],
+                            "expected": {"accountAssignmentScopeEnabled": True, "assignedAccountIds": [account_id]},
+                        },
+                    },
+                )
+            )
+            tasks.append(patch)
+            async with asyncio.timeout(10):
+                writer_pid = await patch_pid
+                while not await observer.scalar(
+                    text("SELECT :admission = ANY(pg_blocking_pids(:writer))"),
+                    {"admission": admission_pid, "writer": writer_pid},
+                ):
+                    assert not patch.done(), "the PATCH should wait on the reservation's limit row"
+                    await asyncio.sleep(0.01)
+                release_limit.set()
+                reservation, updated = await asyncio.gather(reserve, patch)
+            assert reservation is not None
+            assert updated.status_code == 200, updated.text
+            saved = updated.json()
+            assert saved["accountAssignmentScopeEnabled"] is True
+            assert saved["assignedAccountIds"] == []
+            assert saved["limits"][0]["maxValue"] == 200_000
+            persisted = await ApiKeysRepository(observer).get_usage_reservation(reservation.reservation_id)
+            assert persisted is not None and persisted.status == "reserved"
+            assert saved["limits"][0]["currentValue"] == persisted.items[0].reserved_delta
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,7 @@ from sqlalchemy import BigInteger, Integer, cast, delete, func, insert, literal,
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, load_only, raiseload, selectinload
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.utils.time import utcnow
 from app.db.models import (
@@ -429,7 +430,11 @@ class ApiKeysRepository:
             # Take the writer lock even when the mode stays the same, as
             # concurrent writers can still replace the assignment rows.
             if self._session.get_bind().dialect.name == "postgresql":
-                await self._session.execute(select(ApiKey.id).where(ApiKey.id == key_id).with_for_update())
+                # FOR NO KEY UPDATE lets a reservation holding a limit row
+                # finish its foreign-key check while this PATCH waits for that limit.
+                await self._session.execute(
+                    select(ApiKey.id).where(ApiKey.id == key_id).with_for_update(key_share=True)
+                )
             else:
                 await self._session.execute(
                     update(ApiKey)
@@ -475,6 +480,8 @@ class ApiKeysRepository:
         if account_assignment_scope_enabled is not _UNSET:
             assert isinstance(account_assignment_scope_enabled, bool)
             row.account_assignment_scope_enabled = account_assignment_scope_enabled
+            # A writer may have changed the flag between the ORM read and the lock.
+            flag_modified(row, "account_assignment_scope_enabled")
         if source_assignment_scope_enabled is not _UNSET:
             assert isinstance(source_assignment_scope_enabled, bool)
             row.source_assignment_scope_enabled = source_assignment_scope_enabled

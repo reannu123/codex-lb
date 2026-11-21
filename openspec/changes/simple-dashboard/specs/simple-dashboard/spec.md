@@ -80,7 +80,7 @@ Saving SHALL persist scope atomically, show pending and committed state distinct
 #### Scenario: Stale scope draft is rejected
 - **GIVEN** an operator has an unsaved scope draft
 - **WHEN** another editor commits a different scope and the operator saves
-- **THEN** the card shows the conflict and the current committed scope
+- **THEN** the card shows the conflict and which accounts are currently committed, including when the assignment count is unchanged
 - **AND** nothing is reported as saved until the operator reviews and saves again
 
 #### Scenario: A successful HTTP response does not confirm the requested scope

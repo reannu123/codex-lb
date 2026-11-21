@@ -82,6 +82,12 @@ The save MUST preserve already admitted work and its settlement. Reopening the k
 - **THEN** the existing response can complete and settle once
 - **AND** the second request receives the scope error without closing or reassigning the first response
 
+#### Scenario: A Realtime sideband starts new work after scope closes
+- **GIVEN** an established Realtime sideband has admitted a response
+- **WHEN** the key becomes scoped-empty and the sideband sends a new `response.create` event
+- **THEN** the proxy emits a Realtime error event for the denied creation and does not forward it
+- **AND** the sideband continues to relay events for the admitted response
+
 #### Scenario: Reopened key is limited to the newly permitted account
 - **GIVEN** an empty scope has denied new work and an older affinity points elsewhere
 - **WHEN** the operator grants account A and submits new work using the same key

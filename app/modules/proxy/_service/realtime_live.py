@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import timedelta
 from typing import Protocol, cast
 from urllib.parse import urlparse
@@ -23,7 +24,8 @@ from app.core.clients.proxy_websocket import (
 from app.core.clock import clock_for, scheduler_for
 from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import get_settings
-from app.core.errors import openai_error
+from app.core.errors import OpenAIErrorEnvelope, openai_error
+from app.core.exceptions import ProxyAuthError
 from app.core.upstream_proxy import ResolvedUpstreamRoute
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.shared_future import _await_task_deferring_cancellation
@@ -87,6 +89,8 @@ class _RealtimeLiveServiceProtocol(Protocol):
     _load_balancer: _AccountLeaseReleaser
     _repo_factory: ProxyRepoFactory
     _live_websocket_connector: LiveWebSocketConnector
+
+    async def _refresh_websocket_api_key_policy(self, api_key: ApiKeyData | None) -> ApiKeyData | None: ...
 
     async def _select_account_with_budget_compatible(
         self,
@@ -268,6 +272,7 @@ async def _relay_downstream_to_upstream(
     *,
     max_message_bytes: int,
     close_timeout_seconds: float,
+    admit_response: Callable[[], Awaitable[OpenAIErrorEnvelope | None]] | None,
 ) -> None:
     while True:
         message = await websocket.receive()
@@ -279,26 +284,35 @@ async def _relay_downstream_to_upstream(
                 timeout_seconds=close_timeout_seconds,
             )
             return
-        text = message.get("text")
-        if isinstance(text, str):
-            if len(text.encode("utf-8")) > max_message_bytes:
-                await upstream.close(code=1009, timeout_seconds=close_timeout_seconds)
-                await _safe_close_downstream(websocket, code=1009)
-                return
-            await upstream.send_text(text)
-            continue
-        data = message.get("bytes")
-        if isinstance(data, bytes):
-            if len(data) > max_message_bytes:
-                await upstream.close(code=1009, timeout_seconds=close_timeout_seconds)
-                await _safe_close_downstream(websocket, code=1009)
-                return
-            await upstream.send_bytes(data)
-            continue
-        raise UpstreamWebSocketTransportError(
-            "Unsupported downstream websocket frame",
-            error_code="upstream_unavailable",
-        )
+        frame = message.get("text")
+        if not isinstance(frame, str):
+            frame = message.get("bytes")
+        if not isinstance(frame, (str, bytes)):
+            raise UpstreamWebSocketTransportError(
+                "Unsupported downstream websocket frame",
+                error_code="upstream_unavailable",
+            )
+        if len(frame.encode("utf-8") if isinstance(frame, str) else frame) > max_message_bytes:
+            await upstream.close(code=1009, timeout_seconds=close_timeout_seconds)
+            await _safe_close_downstream(websocket, code=1009)
+            return
+        if admit_response is not None:
+            try:
+                event = json.loads(frame)
+            except (ValueError, RecursionError):
+                event = None
+            if isinstance(event, dict) and event.get("type") == "response.create":
+                denial = await admit_response()
+                if denial is not None:
+                    detail = dict(denial["error"])
+                    if isinstance(event.get("event_id"), str):
+                        detail["event_id"] = event["event_id"]
+                    await websocket.send_json({"type": "error", "error": detail})
+                    continue
+        if isinstance(frame, str):
+            await upstream.send_text(frame)
+        else:
+            await upstream.send_bytes(frame)
 
 
 async def _relay_upstream_to_downstream(
@@ -340,6 +354,7 @@ async def _relay_live_websocket(
     *,
     max_message_bytes: int,
     close_timeout_seconds: float,
+    admit_response: Callable[[], Awaitable[OpenAIErrorEnvelope | None]] | None = None,
 ) -> None:
     # Relay children belong to the realtime transport loop, not to a proxy
     # turn; they stay raw asyncio tasks (PR B allowance).
@@ -350,6 +365,7 @@ async def _relay_live_websocket(
                 upstream,
                 max_message_bytes=max_message_bytes,
                 close_timeout_seconds=close_timeout_seconds,
+                admit_response=admit_response,
             ),
             name="realtime-live-downstream-to-upstream",
         ),
@@ -475,6 +491,19 @@ class _RealtimeLiveMixin:
                 openai_error("realtime_call_not_found", "Realtime call binding not found or expired"),
             )
 
+        async def admit_response() -> OpenAIErrorEnvelope | None:
+            try:
+                current_key = await proxy._refresh_websocket_api_key_policy(api_key)
+            except ProxyAuthError as exc:
+                return openai_error(exc.code, exc.message, error_type=exc.error_type)
+            assert current_key is not None
+            if (
+                current_key.account_assignment_scope_enabled
+                and owner_account_id not in current_key.assigned_account_ids
+            ):
+                return openai_error("realtime_call_not_found", "Realtime call binding not found or expired")
+            return None
+
         request_id = get_request_id() or ensure_request_id(None)
         clock = clock_for(proxy)
         scheduler = scheduler_for(proxy)
@@ -590,6 +619,7 @@ class _RealtimeLiveMixin:
                 relay_upstream,
                 max_message_bytes=MAX_SSE_EVENT_BYTES,
                 close_timeout_seconds=upstream_close_timeout_seconds,
+                admit_response=admit_response,
             )
             log_status = "success"
         except WebSocketDisconnect:

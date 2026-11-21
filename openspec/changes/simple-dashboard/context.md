@@ -61,9 +61,12 @@ sent a correctly signed forwarded continuation to B's internal bridge endpoint a
 got the same 403 before bridge owner lookup. The harness generated that request with the normal
 forwarding serializer and sent it directly to the receiving app.
 
-Still unverified on two real replicas: automatic ring forwarding with live bridge-session reuse and
-completion and settlement of concurrent in-flight work. The loopback latency measurements do not cover
-a remote database or a cold key cache.
+Two later loopback PostgreSQL runs registered a two-member bridge ring and verified automatic forwarding
+in both directions with a single synthetic upstream WebSocket per run. With a forwarded response paused,
+the owner saved empty scope. Both replicas denied new work without a new upstream frame or reservation.
+The paused response completed and the two admitted turns settled to 52 tokens. Reopening then reused the
+same owner and WebSocket and the repeat verified three finalized reservations and exactly 78 tokens.
+The loopback latency measurements do not cover a remote database or a cold key cache.
 
 ## Rollout and rollback (operator notes)
 
@@ -111,3 +114,17 @@ replica may still apply unrelated fields on a combined edit.
 
 The draft review uses the local evidence above while hosted Actions capacity is unavailable. The
 before and after images are available in the owning Orchestrator session's Artifacts tab.
+
+## Draft review follow-up
+
+- Scope writes explicitly flush the mode even if it matches the row loaded before locking. The legacy
+  race test pauses after that read, commits an unrestricted update, and checks that the resumed PATCH
+  commits both scoped mode and its replacement assignments.
+- The PostgreSQL writer uses `FOR NO KEY UPDATE`. The concurrency test uses `pg_blocking_pids` to
+  observe the scope-and-limits PATCH waiting on an admission's limit row. The reservation and PATCH
+  then both commit, and the updated limit retains the reserved usage.
+- Established Realtime sidebands refresh policy for `response.create` on text and binary JSON frames.
+  The regression observes an in-band scope error for the new response, the terminal event for prior
+  work, and successful admission after reopening the same socket.
+- A card conflict displays committed account membership while Save is disabled. The regression changes
+  the saved account from A to B while the draft selects C, with the assignment count unchanged.

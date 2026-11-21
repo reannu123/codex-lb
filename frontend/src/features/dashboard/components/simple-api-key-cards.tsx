@@ -35,8 +35,8 @@ function ApiKeyCard({ apiKey, accounts, canEdit, canEditAccounts, busy, onEdit, 
   const [draft, setDraft] = useState<ScopeDraft | null>(null);
   const [error, setError] = useState<string | null>(null);
   const saved = apiKeyAccountScope(apiKey);
-  const scope = draft?.next ?? saved;
   const stale = draft !== null && !sameAccountScope(draft.expected, saved);
+  const scope = stale ? saved : (draft?.next ?? saved);
   const all = !scope.accountAssignmentScopeEnabled;
   const assignable = accounts.filter((account) => isAccountAssignmentSelectable(account.status));
   const visibleAccounts = accounts.filter((account) =>

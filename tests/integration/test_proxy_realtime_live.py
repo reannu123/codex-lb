@@ -1010,6 +1010,119 @@ async def test_realtime_sideband_failure_log_is_content_free(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("frame_mode", ["text", "binary"])
+async def test_open_realtime_sideband_checks_scope_for_new_responses(
+    app_instance, async_client, monkeypatch, frame_mode
+):
+    monkeypatch.setattr(
+        proxy_api_module,
+        "validate_required_proxy_api_key_authorization",
+        validate_required_proxy_api_key_authorization,
+    )
+    call_id = "rtc_scope_open_connection"
+
+    async def fake_codex_control_request(*_args, **_kwargs):
+        return CodexControlResponse(
+            status_code=201,
+            body=b"v=answer\r\n",
+            headers={"content-type": "application/sdp", "location": f"/v1/realtime/calls/{call_id}"},
+        )
+
+    class Upstream:
+        def __init__(self):
+            self.messages: asyncio.Queue[UpstreamWebSocketMessage] = asyncio.Queue()
+            self.received: list[str] = []
+
+        async def send_text(self, text: str) -> None:
+            event = json.loads(text)
+            event_id = event["event_id"]
+            self.received.append(event_id)
+            kind = "response.created" if event["type"] == "response.create" else "session.updated"
+            await self.messages.put(
+                UpstreamWebSocketMessage(kind="text", text=json.dumps({"type": kind, "id": event_id}))
+            )
+
+        async def send_bytes(self, data: bytes) -> None:
+            await self.send_text(data.decode())
+
+        async def receive(self) -> UpstreamWebSocketMessage:
+            return await self.messages.get()
+
+        async def close(self, **_kwargs) -> None:
+            pass
+
+        def response_header(self, _name: str) -> None:
+            return None
+
+    upstream = Upstream()
+
+    async def connect(*_args, **_kwargs):
+        return upstream
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
+    monkeypatch.setattr(proxy_websocket_module, "_connect_upstream_websocket", connect)
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={
+            "auth_json": (
+                "auth.json",
+                json.dumps(_auth_json("acc_live_open", "live-open@example.com")),
+                "application/json",
+            )
+        },
+    )
+    assert imported.status_code == 200
+    account_id = imported.json()["accountId"]
+    created_key = await async_client.post(
+        "/api/api-keys/", json={"name": "live-open-scope", "assignedAccountIds": [account_id]}
+    )
+    assert created_key.status_code == 200
+    key = created_key.json()
+    headers = {"Authorization": f"Bearer {key['key']}"}
+    call = await async_client.post(
+        "/backend-api/codex/realtime/calls",
+        content=b"v=offer\r\n",
+        headers={**headers, "content-type": "application/sdp"},
+    )
+    assert call.status_code == 201, call.text
+    expected = {"accountAssignmentScopeEnabled": True, "assignedAccountIds": [account_id]}
+    empty = {"accountAssignmentScopeEnabled": True, "assignedAccountIds": []}
+
+    async with off_loop_test_client(app_instance) as client:
+        with client.websocket_connect(f"/v1/live/{call_id}", headers=headers) as websocket:
+            websocket.send_json({"type": "response.create", "event_id": "admitted"}, mode=frame_mode)
+            assert websocket.receive_json() == {"type": "response.created", "id": "admitted"}
+
+            patch = await async_client.patch(
+                f"/api/api-keys/{key['id']}", json={"accountScopeUpdate": {**empty, "expected": expected}}
+            )
+            assert patch.status_code == 200, patch.text
+
+            websocket.send_json({"type": "response.create", "event_id": "denied"}, mode=frame_mode)
+            denied = websocket.receive_json()
+            assert denied["type"] == "error"
+            assert denied["error"]["code"] == "api_key_account_scope_empty"
+            assert denied["error"]["event_id"] == "denied"
+
+            assert client.portal is not None
+            client.portal.call(
+                upstream.messages.put,
+                UpstreamWebSocketMessage(kind="text", text='{"type":"response.done","id":"admitted"}'),
+            )
+            assert websocket.receive_json() == {"type": "response.done", "id": "admitted"}
+            websocket.send_json({"type": "session.update", "event_id": "control"})
+            assert websocket.receive_json() == {"type": "session.updated", "id": "control"}
+            assert upstream.received == ["admitted", "control"]
+
+            reopen = await async_client.patch(
+                f"/api/api-keys/{key['id']}", json={"accountScopeUpdate": {**expected, "expected": empty}}
+            )
+            assert reopen.status_code == 200, reopen.text
+            websocket.send_json({"type": "response.create", "event_id": "reopened"}, mode=frame_mode)
+            assert websocket.receive_json() == {"type": "response.created", "id": "reopened"}
+
+
+@pytest.mark.asyncio
 async def test_realtime_sideband_rejects_reassigned_key_scope_before_owner_use(
     app_instance,
     async_client,
