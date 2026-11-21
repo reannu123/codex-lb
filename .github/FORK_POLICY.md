@@ -36,8 +36,9 @@ A PR may merge only when all of these hold on its **current head SHA**:
 5. For agent-prepared PRs, the orchestrator verifies the gates and coordinates each
    merge. Production deployment always needs the owner's direct approval.
 
-The `main` branch protection requires `Fork CI required` and blocks force pushes and
-deletion. Admin bypass is never used to land a change.
+Once this policy is adopted, `main` branch protection requires `Fork CI required` and
+blocks force pushes and deletion. Until then the gates above are enforced by review and
+orchestrator coordination. Admin bypass is never used to land a change.
 
 ## Image publishing
 

@@ -57,7 +57,14 @@ jobs:
       - name: Validate canonical OpenSpec capabilities
         run: npx --yes @fission-ai/openspec@1.11.0 validate --specs
       - name: Strictly validate changed OpenSpec folders
+        if: github.event_name != 'workflow_dispatch'
         run: python3 .github/scripts/validate_changed_openspec.py
+      # A manual run has no change set, and most inherited upstream change
+      # folders do not pass strict validation, so dispatch validates the
+      # canonical specs (above) and records that the per-change step is N/A.
+      - name: Changed OpenSpec folders (manual run)
+        if: github.event_name == 'workflow_dispatch'
+        run: echo "::notice::workflow_dispatch has no change set; canonical specs validated, per-change strict validation applies to pull requests and pushes."
 
   python-quality:
     name: Lint (ruff, architecture) and type check (ty)

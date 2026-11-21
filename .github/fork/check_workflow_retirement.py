@@ -4,7 +4,7 @@
 Upstream workflows are retired on the fork by guarding their root jobs with
 ``github.repository == 'Soju06/codex-lb'`` (the pattern upstream already uses),
 so imports from upstream stay conflict-light. A job counts as retired when its
-``if`` carries that guard, or when it only runs after retired jobs and does
+whole ``if`` is that guard, or the guard ANDed with one fully grouped remainder, or when it only runs after retired jobs and does
 not opt back in with ``always()``. New upstream workflows or jobs therefore
 fail this check until they are guarded or added to ``KEPT`` below.
 """
@@ -24,6 +24,31 @@ KEPT: dict[str, set[str]] = {
 }
 
 
+def _is_upstream_only(condition: str) -> bool:
+    """True only for ``GUARD`` or ``GUARD && (rest)`` with ``rest`` fully grouped.
+
+    Anything else (``GUARD || x``, ``GUARD && a || b``, a guard buried inside a
+    larger expression) cannot be established as upstream-only and is rejected.
+    """
+    expr = " ".join(condition.split())
+    if expr.startswith("${{") and expr.endswith("}}"):
+        expr = expr[3:-2].strip()
+    if expr == GUARD:
+        return True
+    prefix = f"{GUARD} && ("
+    if not expr.startswith(prefix) or not expr.endswith(")"):
+        return False
+    depth = 0
+    for index, char in enumerate(expr[len(prefix) - 1 :], start=len(prefix) - 1):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index == len(expr) - 1
+    return False
+
+
 def _retired(name: str, jobs: dict, memo: dict[str, bool]) -> bool:
     if name in memo:
         return memo[name]
@@ -31,7 +56,7 @@ def _retired(name: str, jobs: dict, memo: dict[str, bool]) -> bool:
     condition = str(job.get("if", ""))
     needs = job.get("needs") or []
     needs = [needs] if isinstance(needs, str) else list(needs)
-    if GUARD in condition:
+    if _is_upstream_only(condition):
         result = True
     elif needs and "always()" not in condition and "failure()" not in condition:
         result = all(_retired(need, jobs, memo) for need in needs)
