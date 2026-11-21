@@ -99,11 +99,10 @@ jobs:
         env:
           IMAGE: ${{ steps.image.outputs.name }}
         run: |
-          if digest=$(docker buildx imagetools inspect "${IMAGE}:sha-${SHA}" --format '{{json .Manifest}}' 2>/dev/null | jq -r .digest); then
-            echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          digest=$(.github/fork/registry_digest.sh "${IMAGE}:sha-${SHA}")
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          if [ -n "${digest}" ]; then
             echo "::notice::${IMAGE}:sha-${SHA} already published as ${digest}; reusing it"
-          else
-            echo "digest=" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Build image (linux/amd64)
@@ -146,13 +145,18 @@ jobs:
             exit 0
           fi
           # Re-check right before pushing so a concurrent publisher is never overwritten.
-          if raced=$(docker buildx imagetools inspect "${IMAGE}:sha-${SHA}" --format '{{json .Manifest}}' 2>/dev/null | jq -r .digest); then
+          raced=$(.github/fork/registry_digest.sh "${IMAGE}:sha-${SHA}")
+          if [ -n "${raced}" ]; then
             echo "::error::${IMAGE}:sha-${SHA} appeared as ${raced} during this run; refusing to overwrite an immutable tag."
             exit 1
           fi
           docker tag codex-lb:candidate "${IMAGE}:sha-${SHA}"
           docker push "${IMAGE}:sha-${SHA}"
-          digest=$(docker buildx imagetools inspect "${IMAGE}:sha-${SHA}" --format '{{json .Manifest}}' | jq -r .digest)
+          digest=$(.github/fork/registry_digest.sh "${IMAGE}:sha-${SHA}")
+          if [ -z "${digest}" ]; then
+            echo "::error::pushed ${IMAGE}:sha-${SHA} but could not read its digest back"
+            exit 1
+          fi
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       # A rerun for an older commit must not roll the moving tag back.
