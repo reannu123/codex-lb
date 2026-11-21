@@ -266,6 +266,11 @@ def _consume_close_task_result(task: asyncio.Task[None]) -> None:
         return
 
 
+# Client events that can start a new upstream turn. With voice activity detection, appended
+# audio can commit a user turn and trigger an automatic response without `response.create`.
+_TURN_STARTING_CLIENT_EVENTS = frozenset({"response.create", "input_audio_buffer.append", "input_audio_buffer.commit"})
+
+
 async def _relay_downstream_to_upstream(
     websocket: WebSocket,
     upstream: _CloseOnceLiveWebSocket,
@@ -301,7 +306,7 @@ async def _relay_downstream_to_upstream(
                 event = json.loads(frame)
             except (ValueError, RecursionError):
                 event = None
-            if isinstance(event, dict) and event.get("type") == "response.create":
+            if isinstance(event, dict) and event.get("type") in _TURN_STARTING_CLIENT_EVENTS:
                 denial = await admit_response()
                 if denial is not None:
                     detail = dict(denial["error"])

@@ -88,6 +88,13 @@ The save MUST preserve already admitted work and its settlement. Reopening the k
 - **THEN** the proxy emits a Realtime error event for the denied creation and does not forward it
 - **AND** the sideband continues to relay events for the admitted response
 
+#### Scenario: A Realtime sideband sends audio that could start an automatic turn after scope closes
+- **GIVEN** an established Realtime sideband with voice activity detection has admitted a response
+- **WHEN** the key becomes scoped-empty and the sideband sends `input_audio_buffer.append` or `input_audio_buffer.commit`
+- **THEN** the proxy emits a Realtime error event for each denied event and does not forward it
+- **AND** the sideband continues to relay events for the admitted response
+- **AND** reopening the key allows the same sideband to start a new automatic turn
+
 #### Scenario: Reopened key is limited to the newly permitted account
 - **GIVEN** an empty scope has denied new work and an older affinity points elsewhere
 - **WHEN** the operator grants account A and submits new work using the same key
