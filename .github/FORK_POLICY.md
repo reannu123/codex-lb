@@ -40,6 +40,19 @@ Once this policy is adopted, `main` branch protection requires `Fork CI required
 blocks force pushes and deletion. Until then the gates above are enforced by review and
 orchestrator coordination. Admin bypass is never used to land a change.
 
+## Image publishing
+
+[`fork-image.yml`](workflows/fork-image.yml) publishes `ghcr.io/reannu123/codex-lb`. It runs
+only after `Fork CI` succeeds for a push to `main`, or by manual dispatch, which itself
+requires a successful Fork CI push run for the commit at the tip of `main`. It builds
+that exact commit, boots it, requires `/health/ready`, and applies the **blocking Trivy
+CRITICAL/HIGH** gate before pushing anything. It pushes the immutable tag
+`sha-<full sha>` and the moving tag `fork-main`. The immutable tag is never overwritten: a
+retry reuses the digest first published under it. Only the current tip of `main` is
+published: a rerun for a superseded commit publishes nothing, and `fork-main` is promoted
+only if the commit is still the tip at promotion time. It never pushes `latest` or release
+tags. Deploying an image is a separate step that needs the owner's direct approval.
+
 ## Broad suites
 
 [`fork-ci-broad.yml`](workflows/fork-ci-broad.yml) is run manually from the Actions tab. It
