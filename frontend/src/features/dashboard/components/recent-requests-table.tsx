@@ -526,13 +526,18 @@ export function RecentRequestsTable({
                     </div>
                   </TableCell> : null}
                   {isColumnVisible("cost") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
-                    {request.costUsd !== null
-                      ? formatRequestCost(request.costUsd)
-                      : t(request.costStatus === "missing_price"
-                        ? "dashboard.requestDetails.missingPrice"
-                        : request.costStatus === "usage_unavailable"
-                          ? "dashboard.requestDetails.usageUnavailable"
-                          : "dashboard.requestDetails.costUnavailable")}
+                    {request.costUsd !== null ? (
+                      formatRequestCost(request.costUsd)
+                    ) : (
+                      // Status labels are wider than amounts; wrap inside the column instead of overflowing it.
+                      <span className="block whitespace-normal break-words font-sans leading-tight text-muted-foreground">
+                        {t(request.costStatus === "missing_price"
+                          ? "dashboard.requestDetails.missingPrice"
+                          : request.costStatus === "usage_unavailable"
+                            ? "dashboard.requestDetails.usageUnavailable"
+                            : "dashboard.requestDetails.costUnavailable")}
+                      </span>
+                    )}
                   </TableCell> : null}
                   {isColumnVisible("details") ? <TableCell className="pr-4 align-top whitespace-normal">
                     {hasError ? (
