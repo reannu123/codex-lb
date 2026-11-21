@@ -18,9 +18,14 @@ class LimitWarmupRepository:
         bind = self._session.get_bind()
         return bind.dialect.name if bind else "sqlite"
 
-    async def latest_by_account(self, account_ids: list[str]) -> dict[str, AccountLimitWarmup]:
+    async def latest_by_account(
+        self, account_ids: list[str], *, window: str | None = None
+    ) -> dict[str, AccountLimitWarmup]:
         if not account_ids:
             return {}
+        conditions = [AccountLimitWarmup.account_id.in_(account_ids)]
+        if window is not None:
+            conditions.append(AccountLimitWarmup.window == window)
         subq = (
             select(
                 AccountLimitWarmup.id.label("warmup_id"),
@@ -31,7 +36,7 @@ class LimitWarmupRepository:
                 )
                 .label("row_number"),
             )
-            .where(AccountLimitWarmup.account_id.in_(account_ids))
+            .where(*conditions)
             .subquery()
         )
         stmt = (
@@ -53,6 +58,7 @@ class LimitWarmupRepository:
         status: str = "pending",
         reset_at_tolerance_seconds: int = 0,
         require_no_prior_attempt: bool = False,
+        blocking_statuses: tuple[str, ...] | None = None,
     ) -> AccountLimitWarmup | None:
         tolerance = max(0, reset_at_tolerance_seconds)
         table = AccountLimitWarmup.__table__
@@ -64,15 +70,16 @@ class LimitWarmupRepository:
         # PostgreSQL a single INSERT .. SELECT is not self-sufficient under READ
         # COMMITTED, so an advisory transaction lock keyed on account serializes
         # both ordinary claims and the cross-window initial-attempt guard.
-        duplicate_in_tolerance_window = (
-            select(AccountLimitWarmup.id)
-            .where(
-                AccountLimitWarmup.account_id == account_id,
-                AccountLimitWarmup.window == window,
-                AccountLimitWarmup.reset_at.between(reset_at - tolerance, reset_at + tolerance),
-            )
-            .exists()
-        )
+        duplicate_conditions = [
+            AccountLimitWarmup.account_id == account_id,
+            AccountLimitWarmup.window == window,
+            AccountLimitWarmup.reset_at.between(reset_at - tolerance, reset_at + tolerance),
+        ]
+        if blocking_statuses is not None:
+            # Only attempts in these states claim the tuple; others (for
+            # example a failed manual attempt) leave it free for a retry.
+            duplicate_conditions.append(AccountLimitWarmup.status.in_(blocking_statuses))
+        duplicate_in_tolerance_window = select(AccountLimitWarmup.id).where(*duplicate_conditions).exists()
         insert_conditions = [~duplicate_in_tolerance_window]
         if require_no_prior_attempt:
             prior_account_attempt = (

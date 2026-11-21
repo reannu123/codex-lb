@@ -49,6 +49,7 @@ export function AccountsPage() {
     probeMutation,
     usageResetMutation,
     limitWarmupMutation,
+    manualWarmupMutation,
     updateMutation,
     deleteMutation,
     routingPolicyMutation,
@@ -70,6 +71,7 @@ export function AccountsPage() {
   type ResetCreditDialogTarget = { accountId: string; availableResetCredits: number };
   const resetCreditDialog = useDialogState<ResetCreditDialogTarget>();
   const usageResetDialog = useDialogState<string>();
+  const manualWarmupDialog = useDialogState<string>();
   const exportDialog = useDialogState<AccountAuthExportResponse>();
   const [deleteHistory, setDeleteHistory] = useState(false);
 
@@ -127,6 +129,7 @@ export function AccountsPage() {
     probeMutation.isPending ||
     usageResetMutation.isPending ||
     limitWarmupMutation.isPending ||
+    manualWarmupMutation.isPending ||
     deleteMutation.isPending ||
     routingPolicyMutation.isPending ||
     exportAuthMutation.isPending ||
@@ -142,6 +145,7 @@ export function AccountsPage() {
     getErrorMessageOrNull(probeMutation.error) ||
     getErrorMessageOrNull(usageResetMutation.error) ||
     getErrorMessageOrNull(limitWarmupMutation.error) ||
+    getErrorMessageOrNull(manualWarmupMutation.error) ||
     getErrorMessageOrNull(deleteMutation.error) ||
     getErrorMessageOrNull(routingPolicyMutation.error) ||
     getErrorMessageOrNull(exportAuthMutation.error) ||
@@ -228,6 +232,7 @@ export function AccountsPage() {
               });
             }}
             showResetCreditExpiryBadge={showResetCreditExpiryBadge}
+            onManualWarmup={(accountId) => manualWarmupDialog.show(accountId)}
             onLimitWarmupChange={(accountId, enabled) =>
               void limitWarmupMutation.mutateAsync({ accountId, enabled })
             }
@@ -302,6 +307,24 @@ export function AccountsPage() {
           onOpenChange={resetCreditDialog.onOpenChange}
         />
       ) : null}
+
+      <ConfirmDialog
+        open={manualWarmupDialog.open}
+        title={t("accounts.manualWarmupDialog.title")}
+        description={t("accounts.manualWarmupDialog.description")}
+        confirmLabel={t("accounts.actions.manualWarmup")}
+        cancelLabel={t("common.cancel")}
+        onOpenChange={manualWarmupDialog.onOpenChange}
+        onConfirm={() => {
+          if (!manualWarmupDialog.data) return;
+          void manualWarmupMutation
+            .mutateAsync(manualWarmupDialog.data)
+            .catch(() => undefined)
+            .finally(() => {
+              manualWarmupDialog.hide();
+            });
+        }}
+      />
 
       <ConfirmDialog
         open={deleteDialog.open}

@@ -8,6 +8,7 @@ import {
   AccountImportResponseSchema,
   AccountLimitWarmupUpdateRequestSchema,
   AccountLimitWarmupUpdateResponseSchema,
+  AccountManualWarmupResponseSchema,
   AccountUpdateRequestSchema,
   AccountsResponseSchema,
   AccountRoutingPolicyUpdateRequestSchema,
@@ -87,6 +88,13 @@ export function updateAccountLimitWarmup(accountId: string, enabled: boolean) {
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/limit-warmup`,
     AccountLimitWarmupUpdateResponseSchema,
     { body: payload },
+  );
+}
+
+export function manuallyWarmupAccount(accountId: string) {
+  return post(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/limit-warmup/manual`,
+    AccountManualWarmupResponseSchema,
   );
 }
 

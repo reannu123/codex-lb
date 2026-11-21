@@ -82,6 +82,7 @@ function mockAccountsQuery(accounts: AccountSummary[]) {
     exportAuthMutation: idleMutation(),
     setAliasMutation: idleMutation(),
     limitWarmupMutation: idleMutation(),
+    manualWarmupMutation: idleMutation(),
     routingPolicyMutation: idleMutation(),
     updateMutation: idleMutation(),
   } as unknown as ReturnType<typeof useAccounts>);
@@ -239,6 +240,7 @@ describe("AccountsPage", () => {
       exportAuthMutation: idleMutation(),
       setAliasMutation: idleMutation(),
       limitWarmupMutation: idleMutation(),
+      manualWarmupMutation: idleMutation(),
       routingPolicyMutation: idleMutation(),
       updateMutation: idleMutation(),
     } as unknown as ReturnType<typeof useAccounts>);
@@ -281,6 +283,7 @@ describe("AccountsPage", () => {
       exportAuthMutation: idleMutation(),
       setAliasMutation: idleMutation(),
       limitWarmupMutation: idleMutation(),
+      manualWarmupMutation: idleMutation(),
       routingPolicyMutation: idleMutation(),
       updateMutation: idleMutation(),
     } as unknown as ReturnType<typeof useAccounts>);
@@ -327,6 +330,7 @@ describe("AccountsPage", () => {
       exportAuthMutation: idleMutation(),
       setAliasMutation: idleMutation(),
       limitWarmupMutation: idleMutation(),
+      manualWarmupMutation: idleMutation(),
       routingPolicyMutation: idleMutation(),
       updateMutation: idleMutation(),
     } as unknown as ReturnType<typeof useAccounts>);
@@ -384,6 +388,7 @@ describe("AccountsPage", () => {
       exportAuthMutation: idleMutation(),
       setAliasMutation: idleMutation(),
       limitWarmupMutation: idleMutation(),
+      manualWarmupMutation: idleMutation(),
       routingPolicyMutation: idleMutation(),
       updateMutation: idleMutation(),
     } as unknown as ReturnType<typeof useAccounts>);
@@ -404,6 +409,101 @@ describe("AccountsPage", () => {
     await waitFor(() => {
       expect(resetUsage).toHaveBeenCalledWith({ accountId: "acc-reset" });
     });
+  });
+
+  it("confirms before sending a manual warm-up and warns about quota", async () => {
+    const user = userEvent.setup();
+    const manualWarmup = vi.fn().mockResolvedValue({
+      accountId: "acc-warm",
+      attemptId: 1,
+      requestId: "limit-warmup-1",
+      status: "succeeded",
+      model: "gpt-5.1-codex-mini",
+      attemptedAt: "2026-01-01T00:00:00Z",
+      completedAt: "2026-01-01T00:00:01Z",
+    });
+
+    mockedUseAccounts.mockReturnValue({
+      accountsQuery: {
+        data: [account({ accountId: "acc-warm", status: "active", limitWarmupEnabled: false })],
+        error: null,
+        refetch: vi.fn(),
+      },
+      importMutation: idleMutation(),
+      pauseMutation: idleMutation(),
+      resumeMutation: idleMutation(),
+      probeMutation: idleMutation(),
+      usageResetMutation: idleMutation(),
+      deleteMutation: idleMutation(),
+      exportAuthMutation: idleMutation(),
+      setAliasMutation: idleMutation(),
+      limitWarmupMutation: idleMutation(),
+      manualWarmupMutation: { isPending: false, error: null, mutateAsync: manualWarmup },
+      routingPolicyMutation: idleMutation(),
+      updateMutation: idleMutation(),
+    } as unknown as ReturnType<typeof useAccounts>);
+
+    render(
+      <MemoryRouter>
+        <AccountsPage />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Warm up now" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Manual warm-up" });
+    expect(dialog).toHaveTextContent("consumes a small amount of quota");
+    expect(dialog).toHaveTextContent("does not confirm that a quota window started");
+    expect(manualWarmup).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "Warm up now" }));
+
+    await waitFor(() => {
+      expect(manualWarmup).toHaveBeenCalledTimes(1);
+    });
+    expect(manualWarmup).toHaveBeenCalledWith("acc-warm");
+    await waitFor(() => {
+      expect(screen.queryByRole("alertdialog", { name: "Manual warm-up" })).not.toBeInTheDocument();
+    });
+  });
+
+  it("closes the manual warm-up dialog when the request fails", async () => {
+    const user = userEvent.setup();
+    const manualWarmup = vi.fn().mockRejectedValue(new Error("A manual warm-up was already sent"));
+
+    mockedUseAccounts.mockReturnValue({
+      accountsQuery: {
+        data: [account({ accountId: "acc-warm", status: "active" })],
+        error: null,
+        refetch: vi.fn(),
+      },
+      importMutation: idleMutation(),
+      pauseMutation: idleMutation(),
+      resumeMutation: idleMutation(),
+      probeMutation: idleMutation(),
+      usageResetMutation: idleMutation(),
+      deleteMutation: idleMutation(),
+      exportAuthMutation: idleMutation(),
+      setAliasMutation: idleMutation(),
+      limitWarmupMutation: idleMutation(),
+      manualWarmupMutation: { isPending: false, error: null, mutateAsync: manualWarmup },
+      routingPolicyMutation: idleMutation(),
+      updateMutation: idleMutation(),
+    } as unknown as ReturnType<typeof useAccounts>);
+
+    render(
+      <MemoryRouter>
+        <AccountsPage />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Warm up now" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Manual warm-up" });
+    await user.click(within(dialog).getByRole("button", { name: "Warm up now" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("alertdialog", { name: "Manual warm-up" })).not.toBeInTheDocument();
+    });
+    expect(manualWarmup).toHaveBeenCalledTimes(1);
   });
 
   it("keeps force probe as an immediate action", async () => {
@@ -447,6 +547,7 @@ describe("AccountsPage", () => {
       exportAuthMutation: idleMutation(),
       setAliasMutation: idleMutation(),
       limitWarmupMutation: idleMutation(),
+      manualWarmupMutation: idleMutation(),
       routingPolicyMutation: idleMutation(),
       updateMutation: idleMutation(),
     } as unknown as ReturnType<typeof useAccounts>);
