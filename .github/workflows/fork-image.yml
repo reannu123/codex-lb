@@ -31,6 +31,7 @@ jobs:
       contents: read
     outputs:
       sha: ${{ steps.sha.outputs.sha }}
+      qualified: ${{ steps.sha.outputs.qualified }}
     steps:
       - name: Require a successful Fork CI push run on main for the commit
         id: sha
@@ -52,15 +53,27 @@ jobs:
             sha="${RUN_SHA}"
           fi
           echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          # Admit only the current tip to the publication slot. A rerun for a
+          # superseded commit would otherwise replace the pending publisher of
+          # the newer tip in the concurrency group and then skip promotion.
+          tip=$(gh api "repos/${REPO}/commits/main" --jq .sha)
+          if [ "${sha}" != "${tip}" ]; then
+            echo "qualified=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${sha} is no longer main's tip (${tip}); not publishing a superseded commit."
+            exit 0
+          fi
+          echo "qualified=true" >> "$GITHUB_OUTPUT"
           echo "Publishing tested main commit ${sha}"
 
   publish:
     name: Build, verify and push
     needs: resolve
+    if: needs.resolve.outputs.qualified == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    # Only runs that qualified in `resolve` take the publication slot, so an
-    # ineligible (failed or cancelled CI) trigger cannot displace a pending one.
+    # Only runs that qualified in `resolve` (successful Fork CI push run for the
+    # commit that is main's current tip) take the publication slot, so neither
+    # an ineligible trigger nor a superseded rerun can displace a pending one.
     concurrency:
       group: fork-image-main
       cancel-in-progress: false
