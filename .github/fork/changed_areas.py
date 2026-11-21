@@ -2,7 +2,8 @@
 """Decide which fork CI groups run for an event (fork-owned; no upstream counterpart).
 
 Pull requests compare the base and head SHAs, pushes compare ``before`` and
-``after``, and ``workflow_dispatch`` runs every group. A change to the fork CI
+``after`` (with rename detection off, so a moved file selects the groups of
+both its old and new paths), and ``workflow_dispatch`` runs every group. A change to the fork CI
 itself runs every group except ``image``: the image group builds and scans
 the container and is triggered only by image inputs, so a CI-only change is
 not blocked by base-image or lockfile advisories it did not introduce.
@@ -51,6 +52,9 @@ AREAS: dict[str, list[str]] = {
         "app/core/openai/**",
         "app/core/upstream_proxy/**",
         "app/core/utils/proxy_env.py",
+        # The wire probes install the Python environment from these.
+        "pyproject.toml",
+        "uv.lock",
         "tests/unit/test_native_egress.py",
         "tests/unit/test_usage_client.py",
         "tests/unit/test_native_egress_packaging.py",
@@ -80,7 +84,7 @@ AREAS: dict[str, list[str]] = {
 def _changed_files(base: str, head: str) -> list[str]:
     subprocess.run(["git", "fetch", "--no-tags", "--depth=200", "origin", base], check=False, capture_output=True)
     out = subprocess.run(
-        ["git", "diff", "--name-only", f"{base}...{head}"], check=True, capture_output=True, text=True
+        ["git", "diff", "--name-only", "--no-renames", f"{base}...{head}"], check=True, capture_output=True, text=True
     ).stdout
     return [line for line in out.splitlines() if line]
 
