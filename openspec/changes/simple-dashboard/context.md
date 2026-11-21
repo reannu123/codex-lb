@@ -123,13 +123,13 @@ before and after images are available in the owning Orchestrator session's Artif
 - The PostgreSQL writer uses `FOR NO KEY UPDATE`. The concurrency test uses `pg_blocking_pids` to
   observe the scope-and-limits PATCH waiting on an admission's limit row. The reservation and PATCH
   then both commit, and the updated limit retains the reserved usage.
-- Established Realtime sidebands refresh policy for `response.create` on text and binary JSON frames.
-  The regression observes an in-band scope error for the new response, the terminal event for prior
-  work, and successful admission after reopening the same socket.
-- The same check covers `input_audio_buffer.append` and `input_audio_buffer.commit`, because with voice
-  activity detection, appended audio can start an automatic response without `response.create`. Output
-  and control events (`response.cancel`, `session.update`, clears) still relay. Each gated event costs
-  one primary-key read of the key, so audio chunks add one read each while a sideband streams audio.
-  Coalescing those reads would delay scope closure and is left as a follow-up if load warrants it.
+- Owner decision: an established Realtime sideband keeps the access it had at connect time and runs
+  until it disconnects, matching existing codex-lb `main`. The scope check stays at Realtime call
+  creation and sideband connect, so the next connection after scope closes gets
+  `api_key_account_scope_empty`. Tradeoff: an open voice session can keep starting turns, including
+  automatic voice-activity turns, until the client disconnects. Per-message checks were tried in
+  review but dropped: they need a database read per audio chunk inline in the relay loop and let a
+  transient read error affect a healthy session. The regression keeps an open sideband relaying
+  `response.create` and audio after the scope closes, then checks that a new connection is denied.
 - A card conflict displays committed account membership while Save is disabled. The regression changes
   the saved account from A to B while the draft selects C, with the assignment count unchanged.
