@@ -21,6 +21,7 @@ from app.core.middleware.api_firewall import add_api_firewall_middleware
 from app.core.middleware.firewall_cache import get_firewall_ip_cache, reset_firewall_ip_cache_for_testing
 from app.core.middleware.trusted_proxy_headers import add_trusted_proxy_headers_middleware
 from app.db.models import Account, AccountStatus, UsageHistory
+from app.modules.api_keys.repository import ApiKeyAccountScope
 from app.modules.api_keys.service import ApiKeyData, ApiKeysRepositoryProtocol
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.load_balancer import LoadBalancer
@@ -52,10 +53,18 @@ async def test_api_key_validation_uses_cache_for_repeated_key(monkeypatch: pytes
         last_used_at=None,
     )
     calls = 0
+    scope_reads = 0
 
     class _SettingsCache:
         async def get(self) -> SimpleNamespace:
             return SimpleNamespace(api_key_auth_enabled=True)
+
+    class _Repository:
+        async def read_account_scope(self, key_id: str) -> ApiKeyAccountScope:
+            nonlocal scope_reads
+            scope_reads += 1
+            assert key_id == api_key_data.id
+            return ApiKeyAccountScope(False, frozenset())
 
     class _Service:
         def __init__(self, _repo: object) -> None:
@@ -72,7 +81,7 @@ async def test_api_key_validation_uses_cache_for_repeated_key(monkeypatch: pytes
 
     monkeypatch.setattr(auth_dependencies, "get_settings_cache", lambda: _SettingsCache())
     monkeypatch.setattr(auth_dependencies, "get_background_session", _fake_session)
-    monkeypatch.setattr(auth_dependencies, "ApiKeysRepository", lambda _session: object())
+    monkeypatch.setattr(auth_dependencies, "ApiKeysRepository", lambda _session: _Repository())
     monkeypatch.setattr(auth_dependencies, "ApiKeysService", _Service)
 
     token = "sk-clb-hot-path"
@@ -83,6 +92,7 @@ async def test_api_key_validation_uses_cache_for_repeated_key(monkeypatch: pytes
         assert resolved == api_key_data
 
     assert calls == 1
+    assert scope_reads == 9
     cache = get_api_key_cache()
     assert expected_hash in cache._cache
     assert token not in cache._cache

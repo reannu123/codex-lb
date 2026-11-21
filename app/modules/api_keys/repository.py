@@ -9,7 +9,8 @@ from typing import Any
 from sqlalchemy import BigInteger, Integer, cast, delete, func, insert, literal, or_, select, text, true, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import load_only, raiseload, selectinload
+from sqlalchemy.orm import joinedload, load_only, raiseload, selectinload
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.utils.time import utcnow
 from app.db.models import (
@@ -40,6 +41,16 @@ from app.modules.api_keys.limit_windows import advance_limit_reset
 
 class ApiKeyOwnerDisabledError(ValueError):
     """Re-enabling a key whose owner account is disabled is refused."""
+
+
+class ApiKeyScopeConflictError(ValueError):
+    """The account scope changed since the editor loaded it."""
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeyAccountScope:
+    enabled: bool
+    account_ids: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,13 +164,17 @@ class ApiKeysRepository:
     def _exclude_warmup_clause():
         return RequestLog.request_kind.not_in(("warmup", "limit_warmup"))
 
-    def _select_api_key(self):
+    def _select_api_key(self, *, join_account_scope: bool = False):
+        # Admission reads the flag and assignments from one statement so a
+        # concurrent commit cannot assemble a scope from two snapshots.
         return (
             select(ApiKey)
             .execution_options(populate_existing=True)
             .options(
                 selectinload(ApiKey.limits),
-                selectinload(ApiKey.account_assignments),
+                joinedload(ApiKey.account_assignments)
+                if join_account_scope
+                else selectinload(ApiKey.account_assignments),
                 selectinload(ApiKey.source_assignments),
             )
         )
@@ -173,8 +188,20 @@ class ApiKeysRepository:
         return created
 
     async def get_by_id(self, key_id: str) -> ApiKey | None:
-        result = await self._session.execute(self._select_api_key().where(ApiKey.id == key_id))
-        return result.scalar_one_or_none()
+        result = await self._session.execute(self._select_api_key(join_account_scope=True).where(ApiKey.id == key_id))
+        return result.unique().scalar_one_or_none()
+
+    async def read_account_scope(self, key_id: str) -> ApiKeyAccountScope | None:
+        result = await self._session.execute(
+            select(ApiKey.account_assignment_scope_enabled, ApiKeyAccountAssignment.account_id)
+            .select_from(ApiKey)
+            .outerjoin(ApiKeyAccountAssignment)
+            .where(ApiKey.id == key_id)
+        )
+        rows = result.all()
+        if not rows:
+            return None
+        return ApiKeyAccountScope(rows[0][0], frozenset(account_id for _, account_id in rows if account_id is not None))
 
     async def get_for_limit_enforcement(self, key_id: str) -> ApiKey | None:
         """Admission-path load for ``enforce_limits_for_request``.
@@ -217,8 +244,10 @@ class ApiKeysRepository:
         return result.scalar_one_or_none()
 
     async def get_by_hash(self, key_hash: str) -> ApiKey | None:
-        result = await self._session.execute(self._select_api_key().where(ApiKey.key_hash == key_hash))
-        return result.scalar_one_or_none()
+        result = await self._session.execute(
+            self._select_api_key(join_account_scope=True).where(ApiKey.key_hash == key_hash)
+        )
+        return result.unique().scalar_one_or_none()
 
     async def list_all(self) -> list[ApiKey]:
         result = await self._session.execute(self._select_api_key().order_by(ApiKey.created_at.desc()))
@@ -238,6 +267,18 @@ class ApiKeysRepository:
             .where(Account.delete_requested_at.is_(None))
         )
         return list(result.scalars().all())
+
+    async def lock_assignable_accounts(self, account_ids: list[str]) -> set[str]:
+        if not account_ids:
+            return set()
+        stmt = (
+            select(Account.id)
+            .where(Account.id.in_(account_ids), Account.delete_requested_at.is_(None))
+            .order_by(Account.id)
+        )
+        if self._session.get_bind().dialect.name == "postgresql":
+            stmt = stmt.with_for_update(read=True)
+        return set((await self._session.scalars(stmt)).all())
 
     async def list_model_sources_by_ids(self, source_ids: list[str]) -> list[ModelSource]:
         if not source_ids:
@@ -367,6 +408,7 @@ class ApiKeysRepository:
         thread_cache_identity_override: str | None | _Unset = _UNSET,
         usage_sections: str | _Unset = _UNSET,
         account_assignment_scope_enabled: bool | _Unset = _UNSET,
+        expected_account_scope: ApiKeyAccountScope | None = None,
         source_assignment_scope_enabled: bool | _Unset = _UNSET,
         expires_at: datetime | None | _Unset = _UNSET,
         is_active: bool | _Unset = _UNSET,
@@ -384,6 +426,24 @@ class ApiKeysRepository:
             # the disable cascade, which is a deadlock rather than a refusal.
             if await self._owner_is_disabled(row.owner_user_id):
                 raise ApiKeyOwnerDisabledError("The key's owner is disabled; re-enable the account first")
+        if account_assignment_scope_enabled is not _UNSET:
+            # Take the writer lock even when the mode stays the same, as
+            # concurrent writers can still replace the assignment rows.
+            if self._session.get_bind().dialect.name == "postgresql":
+                # FOR NO KEY UPDATE lets a reservation holding a limit row
+                # finish its foreign-key check while this PATCH waits for that limit.
+                await self._session.execute(
+                    select(ApiKey.id).where(ApiKey.id == key_id).with_for_update(key_share=True)
+                )
+            else:
+                await self._session.execute(
+                    update(ApiKey)
+                    .where(ApiKey.id == key_id)
+                    .values(account_assignment_scope_enabled=ApiKey.account_assignment_scope_enabled)
+                    .execution_options(synchronize_session=False)
+                )
+            if expected_account_scope is not None and await self.read_account_scope(key_id) != expected_account_scope:
+                raise ApiKeyScopeConflictError("Account scope changed. Reload the key and review your selection.")
         if name is not _UNSET:
             assert isinstance(name, str)
             row.name = name
@@ -420,6 +480,8 @@ class ApiKeysRepository:
         if account_assignment_scope_enabled is not _UNSET:
             assert isinstance(account_assignment_scope_enabled, bool)
             row.account_assignment_scope_enabled = account_assignment_scope_enabled
+            # A writer may have changed the flag between the ORM read and the lock.
+            flag_modified(row, "account_assignment_scope_enabled")
         if source_assignment_scope_enabled is not _UNSET:
             assert isinstance(source_assignment_scope_enabled, bool)
             row.source_assignment_scope_enabled = source_assignment_scope_enabled

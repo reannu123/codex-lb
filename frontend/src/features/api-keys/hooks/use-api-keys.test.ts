@@ -1,9 +1,13 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
+import { http, HttpResponse } from "msw";
 import { createElement, type PropsWithChildren } from "react";
+import { toast } from "sonner";
 import { describe, expect, it, vi } from "vitest";
 
 import { useApiKeys } from "@/features/api-keys/hooks/use-api-keys";
+import { createApiKey } from "@/test/mocks/factories";
+import { server } from "@/test/mocks/server";
 
 function createTestQueryClient(): QueryClient {
   return new QueryClient({
@@ -23,6 +27,48 @@ function createWrapper(queryClient: QueryClient) {
 }
 
 describe("useApiKeys", () => {
+  it.each([
+    { accountAssignmentScopeEnabled: true, assignedAccountIds: ["account-a"] },
+    { assignedAccountIds: [] },
+    { accountAssignmentScopeEnabled: false },
+  ])("rejects an HTTP 200 that cannot confirm scope (%j)", async (responseScope) => {
+    const queryClient = createTestQueryClient();
+    const existingKey = createApiKey({ accountAssignmentScopeEnabled: true, assignedAccountIds: ["account-a"] });
+    const { accountAssignmentScopeEnabled, assignedAccountIds, ...keyWithoutScope } = existingKey;
+    const list = vi.fn(() => HttpResponse.json([existingKey]));
+    const successToast = vi.spyOn(toast, "success").mockImplementation(() => "");
+    const errorToast = vi.spyOn(toast, "error").mockImplementation(() => "");
+    server.use(
+      http.get("/api/api-keys/", list),
+      http.patch("/api/api-keys/:keyId", () => HttpResponse.json({ ...keyWithoutScope, ...responseScope })),
+    );
+
+    try {
+      const { result } = renderHook(() => useApiKeys(), { wrapper: createWrapper(queryClient) });
+      await waitFor(() => expect(result.current.apiKeysQuery.isSuccess).toBe(true));
+
+      const error = "The server did not confirm the requested account scope.";
+      await expect(result.current.updateMutation.mutateAsync({
+        keyId: existingKey.id,
+        payload: {
+          accountScopeUpdate: {
+            accountAssignmentScopeEnabled: false,
+            assignedAccountIds: [],
+            expected: { accountAssignmentScopeEnabled, assignedAccountIds },
+          },
+        },
+      })).rejects.toThrow(error);
+
+      expect(errorToast).toHaveBeenCalledWith(error);
+      expect(successToast).not.toHaveBeenCalled();
+      await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+      expect(result.current.apiKeysQuery.data).toEqual([existingKey]);
+    } finally {
+      successToast.mockRestore();
+      errorToast.mockRestore();
+    }
+  });
+
   it("runs CRUD mutations and returns plain key on create", async () => {
     const queryClient = createTestQueryClient();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");

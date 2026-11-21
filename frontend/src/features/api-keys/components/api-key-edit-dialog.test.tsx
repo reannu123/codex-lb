@@ -267,7 +267,11 @@ describe("ApiKeyEditDialog", () => {
     });
 
     const payload = onSubmit.mock.calls[0][0];
-    expect(payload.assignedAccountIds).toEqual(["acc_primary", "acc_secondary"]);
+    expect(payload.accountScopeUpdate).toEqual({
+      accountAssignmentScopeEnabled: true,
+      assignedAccountIds: ["acc_primary", "acc_secondary"],
+      expected: { accountAssignmentScopeEnabled: false, assignedAccountIds: [] },
+    });
   });
 
   it("keeps the dialog open when selecting portalled model and account menu items", async () => {
@@ -312,7 +316,7 @@ describe("ApiKeyEditDialog", () => {
       <ApiKeyEditDialog
         open
         busy={false}
-        apiKey={createApiKey({ assignedAccountIds: ["acc_primary"] })}
+        apiKey={createApiKey({ accountAssignmentScopeEnabled: true, assignedAccountIds: ["acc_primary"] })}
         onOpenChange={vi.fn()}
         onSubmit={onSubmit}
       />,
@@ -332,7 +336,7 @@ describe("ApiKeyEditDialog", () => {
     expect("assignedAccountIds" in payload).toBe(false);
   });
 
-  it("submits an empty assigned account list when clearing scoped accounts", async () => {
+  it("disables scoping only when explicitly selecting all accounts", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
 
@@ -340,14 +344,14 @@ describe("ApiKeyEditDialog", () => {
       <ApiKeyEditDialog
         open
         busy={false}
-        apiKey={createApiKey({ assignedAccountIds: ["acc_primary"] })}
+        apiKey={createApiKey({ accountAssignmentScopeEnabled: true, assignedAccountIds: ["acc_primary"] })}
         onOpenChange={vi.fn()}
         onSubmit={onSubmit}
       />,
     );
 
     await user.click(await screen.findByRole("button", { name: "1 account selected" }));
-    await user.click(screen.getByRole("menuitemcheckbox", { name: "All accounts" }));
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "Use all accounts, including future accounts" }));
     await user.keyboard("{Escape}");
     await user.click(screen.getByRole("button", { name: "Save" }));
 
@@ -356,10 +360,14 @@ describe("ApiKeyEditDialog", () => {
     });
 
     const payload = onSubmit.mock.calls[0][0];
-    expect(payload.assignedAccountIds).toEqual([]);
+    expect(payload.accountScopeUpdate).toEqual({
+      accountAssignmentScopeEnabled: false,
+      assignedAccountIds: [],
+      expected: { accountAssignmentScopeEnabled: true, assignedAccountIds: ["acc_primary"] },
+    });
   });
 
-  it("submits an empty assigned account list when a scoped key loses its assigned accounts", async () => {
+  it("preserves explicit empty scope when editing an unrelated field", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
 
@@ -387,7 +395,7 @@ describe("ApiKeyEditDialog", () => {
 
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.name).toBe("Renamed key");
-    expect(payload.assignedAccountIds).toEqual([]);
+    expect(payload).not.toHaveProperty("accountScopeUpdate");
   });
 
   it("keeps a deny-all source scope when editing an unrelated field", async () => {

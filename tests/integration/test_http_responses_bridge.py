@@ -1882,6 +1882,82 @@ async def test_v1_responses_http_bridge_fails_over_confirmed_proxy_connect_befor
 
 
 @pytest.mark.asyncio
+async def test_empty_scope_denies_an_existing_http_bridge_continuation(async_client, monkeypatch):
+    from app.modules.proxy import api as proxy_api_module
+    from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext, build_owner_forward_headers
+
+    _install_bridge_settings(monkeypatch, enabled=True)
+    owner_settings = proxy_module.get_settings()
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: owner_settings)
+    assert (await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})).status_code == 200
+    account_id = await _import_account(async_client, "acc_bridge_scope", "bridge-scope@example.com")
+    account = await _get_account(account_id)
+    upstream = _FakeBridgeUpstreamWebSocket("resp_bridge_scope")
+    connect = AsyncMock(return_value=upstream)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None, error_code=None))
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", select_account)
+
+    created = await async_client.post(
+        "/api/api-keys/", json={"name": "bridge scope", "assignedAccountIds": [account_id]}
+    )
+    assert created.status_code == 200
+    key = created.json()
+    headers = {"Authorization": f"Bearer {key['key']}", "session-id": "bridge-scope-session"}
+    first_payload = {"model": "gpt-5.4", "input": "first", "stream": True}
+    first = await async_client.post("/v1/responses", json=first_payload, headers=headers)
+    assert first.status_code == 200
+    assert "resp_bridge_scope_1" in first.text
+    assert len(upstream.sent_text) == 1
+
+    key_path = f"/api/api-keys/{key['id']}"
+    assigned = {"accountAssignmentScopeEnabled": True, "assignedAccountIds": [account_id]}
+    empty = {"accountAssignmentScopeEnabled": True, "assignedAccountIds": []}
+    closed = await async_client.patch(key_path, json={"accountScopeUpdate": {**empty, "expected": assigned}})
+    assert closed.status_code == 200
+    continuation = {**first_payload, "input": "next", "previous_response_id": "resp_bridge_scope_1"}
+    turn_state = first.headers.get("x-codex-turn-state")
+    assert turn_state
+    headers["x-codex-turn-state"] = turn_state
+    denied = await async_client.post("/v1/responses", json=continuation, headers=headers)
+    assert denied.status_code == 403
+    assert denied.json()["error"]["code"] == "api_key_account_scope_empty"
+
+    forwarded_payload = proxy_module.ResponsesRequest.model_validate({"instructions": "", **continuation})
+    forwarded_headers = build_owner_forward_headers(
+        headers=headers,
+        payload=forwarded_payload,
+        context=HTTPBridgeForwardContext(
+            origin_instance="instance-b",
+            target_instance="instance-a",
+            codex_session_affinity=False,
+            downstream_turn_state=turn_state,
+            original_request_unanchored=False,
+            original_affinity_kind="session_header",
+            original_affinity_key="bridge-scope-session",
+        ),
+    )
+    owner_denied = await async_client.post(
+        "/internal/bridge/responses",
+        json=forwarded_payload.model_dump_for_forwarding(),
+        headers=forwarded_headers,
+    )
+    assert owner_denied.status_code == 403, owner_denied.text
+    assert owner_denied.json()["error"]["code"] == "api_key_account_scope_empty"
+    assert len(upstream.sent_text) == 1
+    assert connect.await_count == select_account.await_count == 1
+    assert not upstream.closed
+
+    reopened = await async_client.patch(key_path, json={"accountScopeUpdate": {**assigned, "expected": empty}})
+    assert reopened.status_code == 200
+    resumed = await async_client.post("/v1/responses", json=continuation, headers=headers)
+    assert resumed.status_code == 200
+    assert "resp_bridge_scope_2" in resumed.text
+    assert len(upstream.sent_text) == 2
+    assert connect.await_count == select_account.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_codex_session_uses_extended_idle_ttl(async_client, app_instance, monkeypatch):
     _install_bridge_settings_with_limits(monkeypatch, enabled=True, codex_idle_ttl_seconds=600.0)
     account_id = await _import_account(async_client, "acc_http_bridge_codex_ttl", "http-bridge-codex-ttl@example.com")

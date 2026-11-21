@@ -1,3 +1,4 @@
+import { usePermission } from "@/features/auth/hooks/use-auth";
 import { KeySquare } from "lucide-react";
 import { lazy, useMemo } from "react";
 import { useTranslation } from "react-i18next";
@@ -40,6 +41,7 @@ export function ApiKeysSection({
   onHideUpstreamQuotaFromApiKeysChange,
 }: ApiKeysSectionProps) {
   const { t } = useTranslation();
+  const canReadAccounts = usePermission("accounts:read");
   const {
     apiKeysQuery,
     createMutation,
@@ -136,7 +138,8 @@ export function ApiKeysSection({
       <ApiKeyEditDialog
         open={editDialog.open}
         busy={updateMutation.isPending}
-        apiKey={editDialog.data}
+        apiKey={keys.find((key) => key.id === editDialog.data?.id) ?? null}
+        canEditAccounts={canReadAccounts}
         onOpenChange={editDialog.onOpenChange}
         onSubmit={handleUpdate}
       />

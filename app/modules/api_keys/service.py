@@ -18,6 +18,7 @@ from app.core.clients.thread_cache_identity import (
     THREAD_CACHE_IDENTITY_MODES,
     normalize_thread_cache_identity_mode,
 )
+from app.core.exceptions import ProxyApiKeyAccountScopeEmpty
 from app.core.usage.pricing import (
     UsageTokens,
     calculate_cost_from_usage,
@@ -32,6 +33,7 @@ from app.modules.api_keys.last_used_coalescer import ApiKeyLastUsedCoalescer, ge
 from app.modules.api_keys.limit_windows import advance_limit_reset, limit_window_delta, next_limit_reset
 from app.modules.api_keys.repository import (
     _UNSET,
+    ApiKeyAccountScope,
     ApiKeyTrendBucket,
     ApiKeyUsageSummary,
     ApiKeyUsageTotals,
@@ -80,6 +82,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         model_filter: str | None,
     ) -> int: ...
     async def list_accounts_by_ids(self, account_ids: list[str]) -> list[Account]: ...
+    async def lock_assignable_accounts(self, account_ids: list[str]) -> set[str]: ...
     async def list_model_sources_by_ids(self, source_ids: list[str]) -> list[ModelSource]: ...
     async def list_all_accounts(self) -> list[Account]: ...
 
@@ -99,6 +102,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         thread_cache_identity_override: str | None | _Unset = ...,
         usage_sections: str | _Unset = ...,
         account_assignment_scope_enabled: bool | _Unset = ...,
+        expected_account_scope: ApiKeyAccountScope | None = None,
         source_assignment_scope_enabled: bool | _Unset = ...,
         expires_at: datetime | None | _Unset = ...,
         is_active: bool | _Unset = ...,
@@ -297,6 +301,13 @@ class ApiKeyCreateData:
 
 
 @dataclass(frozen=True, slots=True)
+class ApiKeyAccountScopeUpdate:
+    enabled: bool
+    account_ids: list[str]
+    expected: ApiKeyAccountScope
+
+
+@dataclass(frozen=True, slots=True)
 class ApiKeyUpdateData:
     name: str | None = None
     name_set: bool = False
@@ -326,6 +337,7 @@ class ApiKeyUpdateData:
     is_active_set: bool = False
     assigned_account_ids: list[str] | None = None
     assigned_account_ids_set: bool = False
+    account_scope_update: ApiKeyAccountScopeUpdate | None = None
     assigned_source_ids: list[str] | None = None
     assigned_source_ids_set: bool = False
     limits: list[LimitRuleInput] | None = None
@@ -359,6 +371,12 @@ class ApiKeyData:
     assigned_account_ids: list[str] = field(default_factory=list)
     assigned_source_ids: list[str] = field(default_factory=list)
     pooled_credits: "PooledCreditData | None" = None
+
+
+def require_api_key_account_scope(api_key: ApiKeyData) -> ApiKeyData:
+    if api_key.account_assignment_scope_enabled and not api_key.assigned_account_ids:
+        raise ProxyApiKeyAccountScopeEmpty()
+    return api_key
 
 
 @dataclass(frozen=True, slots=True)
@@ -616,9 +634,14 @@ class ApiKeysService:
             allowed_models = _normalize_allowed_models(payload.allowed_models)
         else:
             allowed_models = None
-        if payload.assigned_account_ids_set:
+        scope_update = payload.account_scope_update
+        account_assignment_scope_enabled: bool | _Unset
+        if scope_update is not None:
+            assigned_account_ids = _normalize_assigned_account_ids(scope_update.account_ids)
+            account_assignment_scope_enabled = scope_update.enabled
+        elif payload.assigned_account_ids_set:
             assigned_account_ids = await self._resolve_assigned_account_ids(payload.assigned_account_ids)
-            account_assignment_scope_enabled: bool | _Unset = bool(assigned_account_ids)
+            account_assignment_scope_enabled = bool(assigned_account_ids)
         else:
             assigned_account_ids = None
             account_assignment_scope_enabled = _UNSET
@@ -740,6 +763,7 @@ class ApiKeysService:
                 thread_cache_identity_override=thread_cache_identity_override_update,
                 usage_sections=usage_sections,
                 account_assignment_scope_enabled=account_assignment_scope_enabled,
+                **({"expected_account_scope": scope_update.expected} if scope_update is not None else {}),
                 source_assignment_scope_enabled=source_assignment_scope_enabled,
                 expires_at=expires_at if payload.expires_at_set else _UNSET,
                 is_active=(payload.is_active if payload.is_active_set and payload.is_active is not None else _UNSET),
@@ -748,8 +772,12 @@ class ApiKeysService:
             if row is None:
                 raise ApiKeyNotFoundError(f"API key not found: {key_id}")
 
-            if payload.assigned_account_ids_set:
-                assert assigned_account_ids is not None
+            if assigned_account_ids is not None:
+                if scope_update is not None:
+                    assignable = await self._repository.lock_assignable_accounts(assigned_account_ids)
+                    missing = set(assigned_account_ids) - assignable
+                    if missing:
+                        raise ApiKeyValidationError(f"Unknown account ids: {', '.join(sorted(missing))}")
                 await self._repository.replace_account_assignments(key_id, assigned_account_ids, commit=False)
             if payload.assigned_source_ids_set:
                 assert assigned_source_ids is not None
@@ -781,7 +809,7 @@ class ApiKeysService:
             raise
 
         if (
-            payload.assigned_account_ids_set
+            assigned_account_ids is not None
             or payload.assigned_source_ids_set
             or limit_rows is not None
             or payload.name_set

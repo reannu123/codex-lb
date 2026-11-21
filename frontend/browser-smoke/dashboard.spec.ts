@@ -577,3 +577,72 @@ test("the model source edit dialog keeps Save visible in compact viewports", asy
     expect((await request.delete(`/api/model-sources/${source.id}`)).ok()).toBe(true);
   }
 });
+
+test("Simple Dashboard saves and reopens a key through the real backend", async ({ page }) => {
+  const email = "phase-two-smoke@example.invalid";
+  const externalAccountId = "phase-two-smoke";
+  const idTokenClaims = Buffer.from(JSON.stringify({
+    email,
+    chatgpt_account_id: externalAccountId,
+    "https://api.openai.com/auth": { chatgpt_plan_type: "plus" },
+  })).toString("base64url");
+  const imported = await page.request.post("/api/accounts/import", {
+    multipart: {
+      auth_json: {
+        name: "auth.json",
+        mimeType: "application/json",
+        buffer: Buffer.from(JSON.stringify({
+          tokens: {
+            idToken: `header.${idTokenClaims}.sig`,
+            accessToken: "synthetic-access",
+            refreshToken: "synthetic-refresh",
+            accountId: externalAccountId,
+          },
+        })),
+      },
+    },
+  });
+  expect(imported.ok()).toBe(true);
+  const { accountId } = await imported.json();
+  const created = await page.request.post("/api/api-keys/", {
+    data: { name: "Simple scope smoke", assignedAccountIds: [accountId] },
+  });
+  expect(created.ok()).toBe(true);
+  const { id: keyId } = await created.json();
+  const keyList = await page.request.get("/api/api-keys/");
+  expect(keyList.ok()).toBe(true);
+  const savedKey = (await keyList.json()).find((key: { id: string }) => key.id === keyId);
+  expect(savedKey).toBeDefined();
+
+  await page.goto("/");
+  await expect(page).toHaveURL(/\/dashboard$/);
+  await acceptTelemetryConsentIfShown(page);
+  await page.getByRole("button", { name: "Advanced", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Simple Dashboard" }).click();
+  await expect(page).toHaveURL(/\/simple-dashboard$/);
+  const card = page.locator("article").filter({ has: page.getByRole("heading", { name: "Simple scope smoke" }) });
+  const toggle = card.getByRole("switch", { name: email });
+  await expect(toggle).toBeChecked();
+  await toggle.click();
+  const save = card.getByRole("button", { name: "Save account scope" });
+  const patchPath = `**/api/api-keys/${keyId}`;
+  await page.route(patchPath, (route) => route.fulfill({ json: savedKey }), { times: 1 });
+  const refetch = page.waitForResponse((response) =>
+    response.request().method() === "GET" && new URL(response.url()).pathname === "/api/api-keys/",
+  );
+  await save.click();
+  await expect(card.getByText("The server did not confirm the requested account scope.")).toBeVisible();
+  expect((await refetch).ok()).toBe(true);
+  await expect(page.getByText("API key updated", { exact: true })).toBeHidden();
+  await expect(card.getByText("No accounts assigned. New requests are denied.")).toBeHidden();
+
+  await save.click();
+  await expect(card.getByText("No accounts assigned. New requests are denied.")).toBeVisible();
+  await page.reload();
+  await expect(toggle).not.toBeChecked();
+  await toggle.click();
+  await card.getByRole("button", { name: "Save account scope" }).click();
+  await expect(card.getByText("No accounts assigned. New requests are denied.")).toBeHidden();
+  await expect(toggle).toBeChecked();
+  await expect(page.getByRole("heading", { name: "Request Logs" })).toBeVisible();
+});

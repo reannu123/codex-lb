@@ -15,6 +15,7 @@ export const CORE_NAV_ITEMS = [
 ] as const satisfies readonly NavItem[];
 
 export const ADVANCED_NAV_ITEMS = [
+  { to: "/simple-dashboard", labelKey: "nav.simpleDashboard", requires: "dashboard:read" },
   { to: "/automations", labelKey: "nav.automations", requires: "dashboard:read" },
 ] as const satisfies readonly NavItem[];
 

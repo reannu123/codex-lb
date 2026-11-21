@@ -10,6 +10,7 @@ import {
   updateApiKey,
 } from "@/features/api-keys/api";
 import type {
+  ApiKey,
   ApiKeyCreateRequest,
   ApiKeyUpdateRequest,
 } from "@/features/api-keys/schemas";
@@ -38,11 +39,17 @@ export function useApiKeys() {
   const updateMutation = useMutation({
     mutationFn: ({ keyId, payload }: { keyId: string; payload: ApiKeyUpdateRequest }) =>
       updateApiKey(keyId, payload),
-    onSuccess: () => {
+    onSuccess: (saved) => {
+      queryClient.setQueryData<ApiKey[]>(["api-keys", "list"], (keys) =>
+        keys?.map((key) => key.id === saved.id ? { ...key, ...saved } : key),
+      );
       toast.success(t("apiKeys.toasts.updated"));
       void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
     },
-    onError: (error: Error) => {
+    onError: (error: Error, { payload }) => {
+      if (payload.accountScopeUpdate) {
+        void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
+      }
       toast.error(error.message || t("apiKeys.toasts.updateFailed"));
     },
   });

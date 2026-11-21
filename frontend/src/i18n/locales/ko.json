@@ -1,4 +1,13 @@
 {
+  "nav.simpleDashboard": "간편 대시보드",
+  "apiKeys.accountScope.useAll": "향후 추가되는 계정을 포함한 모든 계정 사용",
+  "apiKeys.accountScope.closed": "할당된 계정이 없습니다. 새 요청이 거부됩니다.",
+  "apiKeys.accountScope.emptyWarning": "저장하면 이 키의 새 요청이 거부됩니다.",
+  "apiKeys.accountScope.stale": "편집 중 계정 범위가 변경되었습니다.",
+  "apiKeys.accountScope.review": "저장된 상태 확인",
+  "apiKeys.accountScope.unconfirmed": "서버가 요청한 계정 범위를 확인하지 않았습니다.",
+  "simpleDashboard.saveScope": "계정 범위 저장",
+  "simpleDashboard.noKeys": "아직 API 키가 없습니다.",
   "accounts.actions.disableWarmup": "Warm-up 끄기",
   "accounts.actions.enableWarmup": "Warm-up 켜기",
   "accounts.actions.forceProbe": "강제 probe",

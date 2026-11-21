@@ -130,6 +130,7 @@ export function useAccountMutations() {
       deleteAccount(accountId, deleteHistory),
     onSuccess: () => {
       toast.success(t("accounts.toasts.deleted"));
+      void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
       void invalidateAccountRelatedQueries(queryClient);
     },
     onError: (error: Error) => {
@@ -305,10 +306,11 @@ export function useAccountUsageResetCredits(accountId: string | null) {
   });
 }
 
-export function useAccounts() {
+export function useAccounts(enabled = true) {
   const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
     queryKey: ["accounts", "list"],
     queryFn: listAccounts,
+    enabled,
     select: (data) => data.accounts,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,

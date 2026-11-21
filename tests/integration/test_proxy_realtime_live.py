@@ -1010,6 +1010,109 @@ async def test_realtime_sideband_failure_log_is_content_free(
 
 
 @pytest.mark.asyncio
+async def test_open_realtime_sideband_keeps_relaying_after_scope_closes_and_next_connect_is_denied(
+    app_instance, async_client, monkeypatch
+):
+    monkeypatch.setattr(
+        proxy_api_module,
+        "validate_required_proxy_api_key_authorization",
+        validate_required_proxy_api_key_authorization,
+    )
+    call_id = "rtc_scope_open_connection"
+
+    async def fake_codex_control_request(*_args, **_kwargs):
+        return CodexControlResponse(
+            status_code=201,
+            body=b"v=answer\r\n",
+            headers={"content-type": "application/sdp", "location": f"/v1/realtime/calls/{call_id}"},
+        )
+
+    class Upstream:
+        def __init__(self):
+            self.messages: asyncio.Queue[UpstreamWebSocketMessage] = asyncio.Queue()
+            self.received: list[str] = []
+
+        async def send_text(self, text: str) -> None:
+            event = json.loads(text)
+            event_id = event["event_id"]
+            self.received.append(event_id)
+            await self.messages.put(
+                UpstreamWebSocketMessage(kind="text", text=json.dumps({"type": "response.created", "id": event_id}))
+            )
+
+        async def send_bytes(self, data: bytes) -> None:
+            await self.send_text(data.decode())
+
+        async def receive(self) -> UpstreamWebSocketMessage:
+            return await self.messages.get()
+
+        async def close(self, **_kwargs) -> None:
+            pass
+
+        def response_header(self, _name: str) -> None:
+            return None
+
+    upstream = Upstream()
+
+    async def connect(*_args, **_kwargs):
+        return upstream
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", fake_codex_control_request)
+    monkeypatch.setattr(proxy_websocket_module, "_connect_upstream_websocket", connect)
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={
+            "auth_json": (
+                "auth.json",
+                json.dumps(_auth_json("acc_live_open", "live-open@example.com")),
+                "application/json",
+            )
+        },
+    )
+    assert imported.status_code == 200
+    account_id = imported.json()["accountId"]
+    created_key = await async_client.post(
+        "/api/api-keys/", json={"name": "live-open-scope", "assignedAccountIds": [account_id]}
+    )
+    assert created_key.status_code == 200
+    key = created_key.json()
+    headers = {"Authorization": f"Bearer {key['key']}"}
+    call = await async_client.post(
+        "/backend-api/codex/realtime/calls",
+        content=b"v=offer\r\n",
+        headers={**headers, "content-type": "application/sdp"},
+    )
+    assert call.status_code == 201, call.text
+    expected = {"accountAssignmentScopeEnabled": True, "assignedAccountIds": [account_id]}
+    empty = {"accountAssignmentScopeEnabled": True, "assignedAccountIds": []}
+
+    async with off_loop_test_client(app_instance) as client:
+        with client.websocket_connect(f"/v1/live/{call_id}", headers=headers) as websocket:
+            websocket.send_json({"type": "response.create", "event_id": "before"})
+            assert websocket.receive_json() == {"type": "response.created", "id": "before"}
+
+            patch = await async_client.patch(
+                f"/api/api-keys/{key['id']}", json={"accountScopeUpdate": {**empty, "expected": expected}}
+            )
+            assert patch.status_code == 200, patch.text
+
+            # The open voice session keeps the access it had at connect time.
+            websocket.send_json({"type": "response.create", "event_id": "after"})
+            assert websocket.receive_json() == {"type": "response.created", "id": "after"}
+            websocket.send_json({"type": "input_audio_buffer.append", "audio": "AAAA", "event_id": "audio"})
+            assert websocket.receive_json() == {"type": "response.created", "id": "audio"}
+            assert upstream.received == ["before", "after", "audio"]
+
+        # The scope change applies when the voice connection is next opened.
+        with pytest.raises(WebSocketDenialResponse) as denied:
+            with client.websocket_connect(f"/v1/live/{call_id}", headers=headers):
+                pass
+    assert denied.value.status_code == 403
+    assert denied.value.json()["error"]["code"] == "api_key_account_scope_empty"
+    assert upstream.received == ["before", "after", "audio"]
+
+
+@pytest.mark.asyncio
 async def test_realtime_sideband_rejects_reassigned_key_scope_before_owner_use(
     app_instance,
     async_client,

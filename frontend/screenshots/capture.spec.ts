@@ -21,6 +21,7 @@ import {
   createAccountSummary,
   createConversationDetails,
   createConversationEntry,
+  createDashboardAuthSession,
   createConversationsResponse,
 } from "../src/test/mocks/factories";
 
@@ -385,4 +386,103 @@ test("login", async ({ page }) => {
     session: unauthenticatedSession,
     waitFor: 'input[type="password"]',
   });
+});
+
+test.describe("Simple Dashboard", () => {
+  test.use({ timezoneId: "America/New_York" });
+
+  test("saves and reopens scope with the existing dashboard still at the root", async ({ page }) => {
+    const screenshotDir = process.env.SIMPLE_DASHBOARD_SCREENSHOT_DIR;
+    await applyTheme(page, "light");
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.clock.setFixedTime(new Date("2026-03-08T05:30:00Z"));
+    const twoAccounts = accounts.slice(0, 2).map((account) => ({
+      ...account,
+      resetAtPrimary: "2026-03-08T06:30:00Z",
+      resetAtSecondary: "2026-03-08T07:30:00Z",
+    }));
+    await interceptApi(page, authSession, twoAccounts);
+    await page.route("**/health/ready", (route) => fulfill(route, { status: "ready" }));
+    await page.route(/\/api\/dashboard\/overview(?:\?|$)/, (route) =>
+      fulfill(route, { ...overview, accounts: twoAccounts }),
+    );
+    let key = { ...apiKeys[0], accountAssignmentScopeEnabled: true, assignedAccountIds: [twoAccounts[0].accountId] };
+    await page.route("**/api/api-keys/", (route) => fulfill(route, [key]));
+    await page.route(`**/api/api-keys/${key.id}`, (route) => {
+      const body = route.request().postDataJSON();
+      expect(body).not.toHaveProperty("assignedAccountIds");
+      const { expected, ...next } = body.accountScopeUpdate;
+      expect(expected).toEqual({
+        accountAssignmentScopeEnabled: key.accountAssignmentScopeEnabled,
+        assignedAccountIds: key.assignedAccountIds,
+      });
+      key = { ...key, ...next };
+      return fulfill(route, key);
+    });
+
+    await page.goto(BASE_URL);
+    await expect(page).toHaveURL(/\/dashboard$/);
+    await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
+    await expect(page.getByText(twoAccounts[0].email, { exact: true }).first()).toBeVisible();
+    if (screenshotDir) await page.screenshot({ path: path.join(screenshotDir, "dashboard-before.png"), fullPage: true });
+
+    await page.goto(`${BASE_URL}/simple-dashboard`);
+    await expect(page.getByRole("heading", { name: "Simple Dashboard" })).toBeVisible();
+    await expect(page.locator('time[datetime="2026-03-08T06:30:00.000Z"]').first()).toHaveText(/1:30:00 AM GMT-5/);
+    await expect(page.locator('time[datetime="2026-03-08T07:30:00.000Z"]').first()).toHaveText(/3:30:00 AM GMT-4/);
+    await expect(page.getByRole("heading", { name: "Request Logs" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Warm up now" }).first().click();
+    await expect(page.getByRole("alertdialog", { name: "Manual warm-up" })).toBeVisible();
+    await page.getByRole("button", { name: "Cancel" }).click();
+    const firstAccount = page.getByRole("switch", { name: twoAccounts[0].email });
+    await expect(firstAccount).toBeChecked();
+    await firstAccount.click();
+    await page.getByRole("button", { name: "Save account scope" }).click();
+    await expect(page.getByText("No accounts assigned. New requests are denied.")).toBeVisible();
+    if (screenshotDir) await page.screenshot({ path: path.join(screenshotDir, "simple-dashboard-after.png"), fullPage: true });
+
+    await page.getByRole("button", { name: "Edit", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "Edit API key" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await firstAccount.click();
+    await page.getByRole("button", { name: "Save account scope" }).click();
+    await expect(page.getByText("No accounts assigned. New requests are denied.")).toBeHidden();
+    await expect(firstAccount).toBeChecked();
+    expect(key.assignedAccountIds).toEqual([twoAccounts[0].accountId]);
+
+    await page.setViewportSize({ width: 420, height: 880 });
+    await page.goto(BASE_URL);
+    await expect(page).toHaveURL(/\/dashboard$/);
+    await page.getByRole("button", { name: "Open menu" }).click();
+    await page.getByRole("link", { name: "Simple Dashboard", exact: true }).click();
+    await expect(page).toHaveURL(/\/simple-dashboard$/);
+    await expect(page.getByRole("heading", { name: "Simple Dashboard" })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(420);
+  });
+});
+
+test("Simple Dashboard respects restricted dashboard reads", async ({ page }) => {
+  await interceptApi(page, createDashboardAuthSession({ role: "guest", permissions: ["read", "dashboard:read:all"], guestAccessEnabled: true, passwordRequired: false }));
+  await page.route("**/health/ready", (route) => fulfill(route, { status: "ready" }));
+  const protectedRequests: string[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (!url.pathname.startsWith("/api/")) return;
+    if (
+      url.pathname.startsWith("/api/accounts") ||
+      url.pathname.startsWith("/api/api-keys") ||
+      url.searchParams.has("apiKeyId") ||
+      url.searchParams.has("conversation_id")
+    ) {
+      protectedRequests.push(url.pathname);
+    }
+  });
+  await page.goto(`${BASE_URL}/simple-dashboard?apiKeyId=private&conversationId=private`);
+  await expect(page.getByRole("heading", { name: "Simple Dashboard" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Request Logs" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Accounts", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "API Keys", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("combobox", { name: "Routing strategy" })).toBeDisabled();
+  expect(protectedRequests).toEqual([]);
 });

@@ -398,15 +398,35 @@ export function formatCountdown(seconds: number): string {
 }
 
 export function formatQuotaResetLabel(resetAt: string | null | undefined): string {
-  const date = parseDate(resetAt);
+  return formatQuotaResetCountdown(parseDate(resetAt), Date.now());
+}
+
+export function formatQuotaResetCountdown(date: Date | null, now: number): string {
   if (!date || date.getTime() <= 0) {
     return RESET_ERROR_LABEL;
   }
-  const diffMs = date.getTime() - Date.now();
+  const diffMs = date.getTime() - now;
   if (diffMs <= 0) {
     return t("formatters.now");
   }
   return formatResetRelative(diffMs);
+}
+
+export function formatLocalResetTime(date: Date): string {
+  const locale = getIntlLocale();
+  const preference = getTimeFormatPreference();
+  return getCachedFormatter(dateFormatters, `quota-reset:${locale}:${preference}`, () =>
+    new Intl.DateTimeFormat(locale, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      second: "2-digit",
+      timeZoneName: "shortOffset",
+      hour12: preference === "12h" ? true : preference === "24h" ? false : undefined,
+    }),
+  ).format(date);
 }
 
 const DAY_MS = 86_400_000;

@@ -113,27 +113,30 @@ export type UseRequestLogsOptions = {
    * sent as an invisible restriction.
    */
   allowApiKeyFilters?: boolean;
+  allowConversationFilters?: boolean;
 };
 
 export function useRequestLogs(options: UseRequestLogsOptions = {}) {
   const enabled = options.enabled ?? true;
   const allowApiKeyFilters = options.allowApiKeyFilters ?? true;
+  const allowConversationFilters = options.allowConversationFilters ?? true;
   const [searchParams, setSearchParams] = useSearchParams();
 
   const filters = useMemo(() => {
     const parsed = parseFilterState(searchParams);
-    if (allowApiKeyFilters || parsed.apiKeyIds.length === 0) {
-      return parsed;
-    }
-    return { ...parsed, apiKeyIds: [] };
-  }, [allowApiKeyFilters, searchParams]);
-  const hasHiddenApiKeyParams = !allowApiKeyFilters && searchParams.has("apiKeyId");
+    return {
+      ...parsed,
+      apiKeyIds: allowApiKeyFilters ? parsed.apiKeyIds : [],
+      conversationId: allowConversationFilters ? parsed.conversationId : null,
+    };
+  }, [allowApiKeyFilters, allowConversationFilters, searchParams]);
+  const hasHiddenFilterParams = (!allowApiKeyFilters && searchParams.has("apiKeyId")) ||
+    (!allowConversationFilters && searchParams.has("conversationId"));
   useEffect(() => {
-    if (!hasHiddenApiKeyParams) {
-      return;
+    if (hasHiddenFilterParams) {
+      setSearchParams(writeFilterState(filters, searchParams), { replace: true });
     }
-    setSearchParams(writeFilterState(filters, searchParams), { replace: true });
-  }, [filters, hasHiddenApiKeyParams, searchParams, setSearchParams]);
+  }, [filters, hasHiddenFilterParams, searchParams, setSearchParams]);
   const filtersApplied = requestLogFiltersApplied(filters);
   const timeframe = filters.timeframe === "all" ? undefined : filters.timeframe;
   const listFilters = useMemo<RequestLogsListFilters>(

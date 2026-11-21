@@ -1,4 +1,13 @@
 {
+  "nav.simpleDashboard": "Simple Dashboard",
+  "apiKeys.accountScope.useAll": "Use all accounts, including future accounts",
+  "apiKeys.accountScope.closed": "No accounts assigned. New requests are denied.",
+  "apiKeys.accountScope.emptyWarning": "Saving will deny new requests for this key.",
+  "apiKeys.accountScope.stale": "Account scope changed while you were editing.",
+  "apiKeys.accountScope.review": "Review saved state",
+  "apiKeys.accountScope.unconfirmed": "The server did not confirm the requested account scope.",
+  "simpleDashboard.saveScope": "Save account scope",
+  "simpleDashboard.noKeys": "No API keys yet.",
   "accounts.actions.disableWarmup": "Disable Warmup",
   "accounts.actions.enableWarmup": "Enable Warmup",
   "accounts.actions.forceProbe": "Force probe",

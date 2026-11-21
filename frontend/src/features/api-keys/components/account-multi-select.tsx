@@ -28,6 +28,8 @@ export type AccountMultiSelectProps = {
   ariaDescribedBy?: string;
   triggerClassName?: string;
   allowPausedAccounts?: boolean;
+  useAllAccounts?: boolean;
+  onUseAllAccounts?: () => void;
 };
 type LimitChip = {
   key: string;
@@ -142,6 +144,8 @@ export function AccountMultiSelect({
   ariaDescribedBy,
   triggerClassName,
   allowPausedAccounts = false,
+  useAllAccounts = value.length === 0,
+  onUseAllAccounts,
 }: AccountMultiSelectProps) {
   const { t } = useTranslation();
   const placeholderLabel = placeholder ?? t("apiKeys.accountSelect.all");
@@ -196,8 +200,12 @@ export function AccountMultiSelect({
   );
 
   const selectAll = useCallback(() => {
-    onChange([]);
-  }, [onChange]);
+    if (onUseAllAccounts) {
+      onUseAllAccounts();
+    } else {
+      onChange([]);
+    }
+  }, [onChange, onUseAllAccounts]);
 
   const label =
     value.length === 0 ? placeholderLabel : t("apiKeys.accountSelect.selected", { count: value.length });
@@ -234,11 +242,11 @@ export function AccountMultiSelect({
           </div>
           <DropdownMenuSeparator />
           <DropdownMenuCheckboxItem
-            checked={value.length === 0}
+            checked={useAllAccounts}
             onCheckedChange={selectAll}
             onSelect={(event) => event.preventDefault()}
           >
-            {t("apiKeys.accountSelect.all")}
+            {onUseAllAccounts ? t("apiKeys.accountScope.useAll") : t("apiKeys.accountSelect.all")}
           </DropdownMenuCheckboxItem>
           <DropdownMenuSeparator />
           {filtered.map((account) => (

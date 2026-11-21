@@ -29,6 +29,8 @@ from app.db.sqlite_lock_retry import is_sqlite_lock_error
 from app.modules.api_keys.last_used_coalescer import ApiKeyLastUsedCoalescer
 from app.modules.api_keys.repository import (
     _UNSET,
+    ApiKeyAccountScope,
+    ApiKeyScopeConflictError,
     ApiKeyTrendBucket,
     ApiKeyUsageSummary,
     ReservationResult,
@@ -166,6 +168,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         thread_cache_identity_override: str | None | _Unset = _UNSET,
         usage_sections: str | _Unset = _UNSET,
         account_assignment_scope_enabled: bool | _Unset = _UNSET,
+        expected_account_scope: ApiKeyAccountScope | None = None,
         source_assignment_scope_enabled: bool | _Unset = _UNSET,
         expires_at: datetime | None | _Unset = _UNSET,
         is_active: bool | _Unset = _UNSET,
@@ -177,6 +180,14 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         row = self.rows.get(key_id)
         if row is None:
             return None
+        if expected_account_scope is not None:
+            assignments = self._account_assignments.get(key_id, [])
+            current_scope = ApiKeyAccountScope(
+                enabled=row.account_assignment_scope_enabled,
+                account_ids=frozenset(assignment.account_id for assignment in assignments),
+            )
+            if expected_account_scope != current_scope:
+                raise ApiKeyScopeConflictError("Account scope changed. Reload the key and review your selection.")
         for field, value in {
             "name": name,
             "allowed_models": allowed_models,
