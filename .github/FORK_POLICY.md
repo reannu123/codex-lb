@@ -47,7 +47,9 @@ only after `Fork CI` succeeds for a push to `main`, or by manual dispatch, which
 requires a successful Fork CI push run for the commit at the tip of `main`. It builds
 that exact commit, boots it, requires `/health/ready`, and applies the **blocking Trivy
 CRITICAL/HIGH** gate before pushing anything. It pushes the immutable tag
-`sha-<full sha>` and the moving tag `fork-main`. It never pushes `latest` or release
+`sha-<full sha>` and the moving tag `fork-main`. The immutable tag is never overwritten: a
+retry reuses the digest first published under it. `fork-main` moves only to a commit
+that is still the tip of `main`. It never pushes `latest` or release
 tags. Deploying an image is a separate step that needs the owner's direct approval.
 
 ## Broad suites
