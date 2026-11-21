@@ -16,3 +16,39 @@ A key scoped to A is opened in both the card and the native editor. The card sen
 - Confirm the Advanced placement with the roadmap owner if top-level tab prominence is required. Moving an existing item would change navigation for current users. A sixth core item would need the project's budget approval path.
 - Confirm the scope freshness plan with the proxy owner. A measured committed read is the proposed starting point, including warmed authentication caches on a second replica. Asynchronous invalidation alone cannot meet immediate denial. Confirm the mixed-version deployment and rollback sequence separately from this local proposal.
 - Confirm operator messaging for installations that allow unauthenticated access. The scope change applies when a request authenticates as the key. Local and explicitly allowlisted anonymous access still follows the existing global auth contract.
+
+## Local verification evidence (2026-11-22)
+
+Two-replica stale-policy check. Two real backend processes (A and B) ran this branch against one fresh
+local PostgreSQL 16 database with a shared `encryption.key`. B's keyed policy was warmed with `GET /v1/models`
+(200). A then saved an explicit empty scope through `PATCH /api/api-keys/{id}`. B's next request returned
+403 `api_key_account_scope_empty` about 3 ms after the save returned, with no poller wait. Both streaming and
+non-streaming `POST /v1/responses` on B returned the same 403 before upstream dispatch. A save using the
+stale baseline returned 409. Reopening on A made B's next request return 200.
+
+SQLite cannot run this check. A second process on the same SQLite file fails at startup on the SQLite
+lifetime lock (`SqliteRunStateLockError`), so multi-replica deployments are PostgreSQL-only by design.
+
+Keyed admission cost, measured on replica B with `GET /v1/models` (cached key, PostgreSQL on loopback,
+N=300 sequential requests, two alternating rounds against baseline `24825dca`):
+
+| Build | SQL statements per request | p50 ms | p95 ms |
+|---|---|---|---|
+| baseline | 3.01 | 4.56 / 5.26 | 5.46 / 6.38 |
+| this change | 4.01 | 5.86 / 5.99 | 7.51 / 7.53 |
+
+The one added statement is the committed scope read
+(`api_keys LEFT JOIN api_key_accounts WHERE id = ?`) on its own background session. The baseline's
+existing per-request reads come from limit enforcement (`is_active`/`expires_at` and limits) and the model
+source list. About 2 background statements per second ran while idle, which accounts for the fractional
+counts. Cache misses now join assignments instead of issuing a separate selectin query; their cost was not
+measured.
+
+Considered reduction: fold the scope read into the limit-enforcement read to save one round trip. Not done.
+Enforcement runs later in a separate session and does not feed account selection, so merging would re-thread
+fresh scope through every admission call site, including WebSocket, and move the denial point. Re-measure
+against a production-like database before deciding. Cache-only checks cannot provide the immediate
+cross-replica denial.
+
+Not yet verified locally: forwarded bridge reuse across replicas, WebSocket admission across replicas,
+latency on a non-loopback database, and frontend unit coverage for the 3.x edge cases.
