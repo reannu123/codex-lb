@@ -39,6 +39,13 @@ class ProxyAuthError(AppError):
     error_type = "authentication_error"
 
 
+class ProxyApiKeyAccountScopeEmpty(ProxyAuthError):
+    status_code = 403
+    code = "api_key_account_scope_empty"
+    error_type = "permission_error"
+    message = "This API key has no assigned accounts. Assign an account in the dashboard to resume requests."
+
+
 class ProxyModelNotAllowed(AppError):
     status_code = 403
     code = "model_not_allowed"

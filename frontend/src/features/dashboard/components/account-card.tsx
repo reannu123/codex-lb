@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Clock, ExternalLink, Play, RotateCcw, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -22,7 +23,10 @@ import {
 import {
   formatDateTimeInline,
   formatPercentNullable,
+  formatLocalResetTime,
+  formatQuotaResetCountdown,
   formatQuotaResetLabel,
+  parseDate,
   formatSingleUnitRemaining,
   formatSlug,
 } from "@/utils/formatters";
@@ -33,6 +37,8 @@ export type AccountCardProps = {
   account: AccountSummary;
   showAccountId?: boolean;
   readOnly?: boolean;
+  compactNow?: number;
+  compactAction?: ReactNode;
   onAction?: (account: AccountSummary, action: AccountAction) => void;
 };
 
@@ -43,14 +49,20 @@ function formatWarmupWindow(window: string): string {
 function QuotaBar({
   label,
   percent,
-  resetLabel,
+  resetAt,
+  compactNow,
 }: {
   label: string;
   percent: number | null;
-  resetLabel: string;
+  resetAt: string | null | undefined;
+  compactNow?: number;
 }) {
   const clamped = percent === null ? 0 : Math.max(0, Math.min(100, percent));
   const hasPercent = percent !== null;
+  const resetDate = compactNow === undefined ? null : parseDate(resetAt);
+  const resetLabel = compactNow === undefined
+    ? formatQuotaResetLabel(resetAt)
+    : formatQuotaResetCountdown(resetDate, compactNow);
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between text-xs">
@@ -80,11 +92,16 @@ function QuotaBar({
         <Clock className="h-3 w-3 shrink-0" />
         <span>{resetLabel}</span>
       </div>
+      {compactNow !== undefined && resetDate !== null && resetDate.getTime() > 0 ? (
+        <time dateTime={resetDate.toISOString()} className="block text-[11px] text-muted-foreground">
+          {formatLocalResetTime(resetDate)}
+        </time>
+      ) : null}
     </div>
   );
 }
 
-export function AccountCard({ account, showAccountId = false, readOnly = false, onAction }: AccountCardProps) {
+export function AccountCard({ account, showAccountId = false, readOnly = false, compactNow, compactAction, onAction }: AccountCardProps) {
   const { t } = useTranslation();
   const blurred = usePrivacyStore((s) => s.blurred);
   const dateDisplayFormat = useDateDisplayFormatStore((s) => s.dateDisplayFormat);
@@ -95,17 +112,18 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
   const primaryRemaining = primaryState.percent;
   const secondaryRemaining = secondaryState.percent;
   const monthlyRemaining = monthlyState.percent;
-  const hasPrimaryWindow = account.windowMinutesPrimary != null || primaryState.everKnown;
-  const hasSecondaryWindow = account.windowMinutesSecondary != null || secondaryState.everKnown;
-  const hasMonthlyWindow = account.windowMinutesMonthly != null || monthlyState.everKnown;
+  const hasPrimaryWindow = account.windowMinutesPrimary != null || primaryState.everKnown ||
+    (compactNow !== undefined && account.resetAtPrimary != null);
+  const hasSecondaryWindow = account.windowMinutesSecondary != null || secondaryState.everKnown ||
+    (compactNow !== undefined && account.resetAtSecondary != null);
+  const hasMonthlyWindow = account.windowMinutesMonthly != null || monthlyState.everKnown ||
+    (compactNow !== undefined && account.resetAtMonthly != null);
   const weeklyOnly = !hasPrimaryWindow && hasSecondaryWindow;
   const monthlyOnly = hasMonthlyWindow && !hasPrimaryWindow && !hasSecondaryWindow;
+  const showPrimary = compactNow === undefined ? !weeklyOnly && !monthlyOnly : hasPrimaryWindow;
+  const showSecondary = compactNow === undefined ? !monthlyOnly : hasSecondaryWindow;
   const subscriptionCreditsLabel = formatCreditValue(accountSubscriptionCredits(account));
   const purchasedCreditsLabel = formatPurchasedCredits(account, t("common.states.unlimited"));
-
-  const primaryReset = formatQuotaResetLabel(account.resetAtPrimary ?? null);
-  const secondaryReset = formatQuotaResetLabel(account.resetAtSecondary ?? null);
-  const monthlyReset = formatQuotaResetLabel(account.resetAtMonthly ?? null);
 
   const title = account.displayName || account.email;
   const compactId = formatCompactAccountId(account.accountId);
@@ -166,17 +184,21 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
       </div>
 
       {/* Quota bars */}
-      <div className={cn("mt-3.5 grid gap-3", weeklyOnly || monthlyOnly ? "grid-cols-1" : "grid-cols-2")}>
+      <div className={cn("mt-3.5 grid gap-3", showPrimary && showSecondary ? "grid-cols-2" : "grid-cols-1")}>
         {monthlyOnly ? (
-          <QuotaBar label={t("common.time.monthly")} percent={monthlyRemaining} resetLabel={monthlyReset} />
+          <QuotaBar label={t("common.time.monthly")} percent={monthlyRemaining} resetAt={account.resetAtMonthly} compactNow={compactNow} />
         ) : (
           <>
-            {!weeklyOnly && <QuotaBar label="5h" percent={primaryRemaining} resetLabel={primaryReset} />}
-            <QuotaBar label={t("common.time.weekly")} percent={secondaryRemaining} resetLabel={secondaryReset} />
+            {showPrimary && <QuotaBar label="5h" percent={primaryRemaining} resetAt={account.resetAtPrimary} compactNow={compactNow} />}
+            {showSecondary && <QuotaBar label={t("common.time.weekly")} percent={secondaryRemaining} resetAt={account.resetAtSecondary} compactNow={compactNow} />}
           </>
         )}
       </div>
 
+      {compactNow !== undefined ? (
+        compactAction ? <div className="mt-3 border-t pt-3">{compactAction}</div> : null
+      ) : (
+        <>
       <div className="mt-3 flex items-center justify-between gap-2 rounded-lg bg-muted/40 px-2.5 py-2 text-xs">
         <div className="min-w-0">
           <p className="font-medium">{warmupStatus}</p>
@@ -280,6 +302,8 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
           </Button>
         )}
       </div>
+        </>
+      )}
     </div>
   );
 }

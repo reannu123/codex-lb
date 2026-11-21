@@ -105,6 +105,7 @@ from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyInvalidError,
     ApiKeysService,
+    require_api_key_account_scope,
 )
 from app.modules.model_sources.selection import (
     effective_model_for_api_key,
@@ -4823,7 +4824,7 @@ class _WebSocketMixin:
             async with proxy._repo_factory() as repos:
                 service = ApiKeysService(repos.api_keys)
                 try:
-                    return await service.get_key_by_id(api_key.id)
+                    return require_api_key_account_scope(await service.get_key_by_id(api_key.id))
                 except ApiKeyInvalidError as exc:
                     raise ProxyAuthError(str(exc)) from exc
 

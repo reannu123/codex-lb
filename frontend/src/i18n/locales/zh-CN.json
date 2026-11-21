@@ -1,4 +1,13 @@
 {
+  "nav.simpleDashboard": "简易仪表盘",
+  "apiKeys.accountScope.useAll": "使用所有账户，包括未来添加的账户",
+  "apiKeys.accountScope.closed": "未分配账户。新请求将被拒绝。",
+  "apiKeys.accountScope.emptyWarning": "保存后将拒绝此密钥的新请求。",
+  "apiKeys.accountScope.stale": "编辑期间账户范围已更改。",
+  "apiKeys.accountScope.review": "查看已保存的状态",
+  "apiKeys.accountScope.unconfirmed": "服务器未确认请求的账户范围。",
+  "simpleDashboard.saveScope": "保存账户范围",
+  "simpleDashboard.noKeys": "暂无 API 密钥。",
   "accounts.actions.disableWarmup": "禁用 Warm-up",
   "accounts.actions.enableWarmup": "启用 Warm-up",
   "accounts.actions.forceProbe": "强制探测",

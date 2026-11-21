@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import Field
+from pydantic import Field, StrictBool
 
 from app.modules.shared.schemas import DashboardModel
 
@@ -45,6 +45,15 @@ class ApiKeyCreateRequest(DashboardModel):
     limits: list[LimitRuleCreate] | None = None
 
 
+class ApiKeyAccountScopeRequest(DashboardModel):
+    account_assignment_scope_enabled: StrictBool
+    assigned_account_ids: list[str]
+
+
+class ApiKeyAccountScopeUpdateRequest(ApiKeyAccountScopeRequest):
+    expected: ApiKeyAccountScopeRequest
+
+
 class ApiKeyUpdateRequest(DashboardModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     allowed_models: list[str] | None = None
@@ -63,6 +72,7 @@ class ApiKeyUpdateRequest(DashboardModel):
     expires_at: datetime | None = None
     is_active: bool | None = None
     assigned_account_ids: list[str] | None = None
+    account_scope_update: ApiKeyAccountScopeUpdateRequest | None = None
     assigned_source_ids: list[str] | None = None
     limits: list[LimitRuleCreate] | None = None
     reset_usage: bool | None = None

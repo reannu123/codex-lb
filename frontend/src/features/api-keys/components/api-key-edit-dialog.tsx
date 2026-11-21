@@ -1,9 +1,11 @@
-import { useMemo, useReducer } from "react";
+import { useMemo, useReducer, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { z } from "zod";
 
+import { AlertMessage } from "@/components/alert-message";
+import { apiKeyAccountScope, sameAccountScope } from "@/features/api-keys/account-scope";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -61,12 +63,14 @@ export type ApiKeyEditDialogProps = {
   open: boolean;
   busy: boolean;
   apiKey: ApiKey | null;
+  canEditAccounts?: boolean;
   onOpenChange: (open: boolean) => void;
   onSubmit: (payload: ApiKeyUpdateRequest) => Promise<void>;
 };
 
 type ApiKeyEditFormProps = {
   apiKey: ApiKey;
+  canEditAccounts: boolean;
   busy: boolean;
   onSubmit: (payload: ApiKeyUpdateRequest) => Promise<void>;
   onClose: () => void;
@@ -92,7 +96,7 @@ function hasSelectionChange(initialIds: string[], nextIds: string[]): boolean {
 
 type ApiKeyEditDraft = {
   selectedModels: string[];
-  selectedAccountIds: string[];
+  accountScope: ReturnType<typeof apiKeyAccountScope>;
   selectedSourceIds: string[];
   selectedReasoningEfforts: ReasoningEffortType[];
   clearSourceScope: boolean;
@@ -110,7 +114,7 @@ type ApiKeyEditDraft = {
 function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
   return {
     selectedModels: apiKey.allowedModels || [],
-    selectedAccountIds: apiKey.assignedAccountIds,
+    accountScope: apiKeyAccountScope(apiKey),
     selectedSourceIds: apiKey.assignedSourceIds,
     selectedReasoningEfforts: apiKey.allowedReasoningEfforts || [],
     clearSourceScope: false,
@@ -133,7 +137,7 @@ function apiKeyEditDraftReducer(
   return { ...state, ...patch };
 }
 
-function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps) {
+function ApiKeyEditForm({ apiKey, canEditAccounts, busy, onSubmit, onClose }: ApiKeyEditFormProps) {
   const { t } = useTranslation();
   const formSchema = z.object({
     name: z.string().min(1, t("apiKeys.validation.nameRequired")),
@@ -149,13 +153,17 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
   const initialLimitRules = useMemo(() => limitsToCreateRules(apiKey), [apiKey]);
   const [draft, updateDraft] = useReducer(apiKeyEditDraftReducer, apiKey, createApiKeyEditDraft);
+  const [initialScope, setInitialScope] = useState(() => apiKeyAccountScope(apiKey));
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const liveScope = apiKeyAccountScope(apiKey);
+  const scopeChanged = canEditAccounts && !sameAccountScope(initialScope, draft.accountScope);
+  const staleScope = scopeChanged && !sameAccountScope(initialScope, liveScope);
   const hasMalformedReasoningPolicy = apiKey.allowedReasoningEfforts?.length === 0;
 
   const handleSubmit = async (values: FormValues) => {
     const normalizedLimits = normalizeLimitRules(draft.limitRules);
-    const shouldSubmitAssignedAccountIds =
-      hasSelectionChange(apiKey.assignedAccountIds, draft.selectedAccountIds) ||
-      (apiKey.accountAssignmentScopeEnabled && draft.selectedAccountIds.length === 0);
+    if (staleScope) return;
+    setSaveError(null);
     // A source-scoped key whose assigned sources were all deleted comes back
     // as scopeEnabled=true with an empty id list (deny-all). Submitting an
     // empty list would make the backend disable scoping and silently broaden
@@ -182,8 +190,8 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
       expiresAt: draft.expiresAt?.toISOString() ?? null,
       isActive: values.isActive,
     };
-    if (shouldSubmitAssignedAccountIds) {
-      payload.assignedAccountIds = draft.selectedAccountIds;
+    if (scopeChanged) {
+      payload.accountScopeUpdate = { ...draft.accountScope, expected: initialScope };
     }
     if (shouldSubmitAssignedSourceIds) {
       payload.assignedSourceIds = draft.selectedSourceIds;
@@ -193,7 +201,8 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
     }
     try {
       await onSubmit(payload);
-    } catch {
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : t("apiKeys.toasts.updateFailed"));
       return;
     }
     onClose();
@@ -237,10 +246,39 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
               </label>
             </div>
 
-            <div className="space-y-1">
-              <div className="text-sm font-medium">{t("apiKeys.form.assignedAccounts")}</div>
-              <AccountMultiSelect value={draft.selectedAccountIds} onChange={(selectedAccountIds) => updateDraft({ selectedAccountIds })} />
-            </div>
+            {canEditAccounts ? (
+              <div className="space-y-1">
+                <div className="text-sm font-medium">{t("apiKeys.form.assignedAccounts")}</div>
+                <AccountMultiSelect
+                  value={draft.accountScope.assignedAccountIds}
+                  useAllAccounts={!draft.accountScope.accountAssignmentScopeEnabled}
+                  placeholder={draft.accountScope.accountAssignmentScopeEnabled ? t("apiKeys.accountScope.closed") : undefined}
+                  onChange={(assignedAccountIds) => updateDraft({
+                    accountScope: { accountAssignmentScopeEnabled: true, assignedAccountIds },
+                  })}
+                  onUseAllAccounts={() => updateDraft({
+                    accountScope: { accountAssignmentScopeEnabled: false, assignedAccountIds: [] },
+                  })}
+                />
+                {staleScope ? (
+                  <>
+                    <AlertMessage variant="error">{t("apiKeys.accountScope.stale")}</AlertMessage>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setInitialScope(liveScope);
+                        updateDraft({ accountScope: liveScope });
+                        setSaveError(null);
+                      }}
+                    >
+                      {t("apiKeys.accountScope.review")}
+                    </Button>
+                  </>
+                ) : null}
+              </div>
+            ) : null}
 
             <div className="space-y-1">
               <div className="text-sm font-medium">{t("apiKeys.form.assignedModelSources")}</div>
@@ -415,8 +453,9 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
           </div>
         </div>
 
+        {saveError ? <AlertMessage variant="error">{saveError}</AlertMessage> : null}
         <DialogFooter className="mt-4">
-          <Button type="submit" disabled={busy || form.formState.isSubmitting}>
+          <Button type="submit" disabled={busy || staleScope || form.formState.isSubmitting}>
             {t("common.actions.save")}
           </Button>
         </DialogFooter>
@@ -469,7 +508,7 @@ function formatTokenCount(n: number): string {
   return String(n);
 }
 
-export function ApiKeyEditDialog({ open, busy, apiKey, onOpenChange, onSubmit }: ApiKeyEditDialogProps) {
+export function ApiKeyEditDialog({ open, busy, apiKey, canEditAccounts = true, onOpenChange, onSubmit }: ApiKeyEditDialogProps) {
   const { t } = useTranslation();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -483,6 +522,7 @@ export function ApiKeyEditDialog({ open, busy, apiKey, onOpenChange, onSubmit }:
           <ApiKeyEditForm
             key={`${apiKey.id}:${open ? "open" : "closed"}`}
             apiKey={apiKey}
+            canEditAccounts={canEditAccounts}
             busy={busy}
             onSubmit={onSubmit}
             onClose={() => onOpenChange(false)}

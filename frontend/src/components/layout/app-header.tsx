@@ -62,6 +62,7 @@ export function AppHeader({
   const { data: accounts = [] } = useQuery({
     queryKey: ["accounts", "list"],
     queryFn: listAccounts,
+    enabled: hasPermission(permissions, "accounts:read"),
     select: (data) => data.accounts,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,

@@ -15,6 +15,8 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import type { AccountSummary } from "@/features/accounts/schemas";
+import { STRATEGY_GUIDE_VALUES } from "./routing-strategies";
+import { SingleAccountRoutingSelect } from "./single-account-routing-select";
 import { InheritBadge } from "@/features/settings/components/inherit-badge";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import type {
@@ -22,7 +24,6 @@ import type {
   DashboardSettings,
   SettingsUpdateRequest,
 } from "@/features/settings/schemas";
-import { formatCompactAccountId } from "@/utils/account-identifiers";
 import { isSingleAccountRoutingSelectable } from "@/utils/account-status";
 import { cn } from "@/lib/utils";
 
@@ -45,17 +46,6 @@ const WEEKLY_PACE_SMOOTHING_OPTIONS = [
   { value: 120, label: "2h" },
   { value: 240, label: "4h" },
 ] as const;
-
-const STRATEGY_GUIDE_VALUES: Record<string, string> = {
-  capacityWeighted: "capacity_weighted",
-  relativeAvailability: "relative_availability",
-  usageWeighted: "usage_weighted",
-  roundRobin: "round_robin",
-  fillFirst: "fill_first",
-  sequentialDrain: "sequential_drain",
-  resetDrain: "reset_drain",
-  singleAccount: "single_account",
-};
 
 function parseWorkingDays(value: string): Set<number> {
   const days = new Set(
@@ -80,12 +70,6 @@ export type RoutingSettingsProps = {
 };
 
 const EMPTY_ACCOUNTS: AccountSummary[] = [];
-
-function accountLabel(account: AccountSummary): string {
-  const name = account.alias?.trim() || account.displayName?.trim() || account.email?.trim() || account.accountId;
-  const compactId = formatCompactAccountId(account.accountId, 6, 4);
-  return `${name} (${compactId})`;
-}
 
 type RoutingSettingsDraft = {
   warmupModel: string;
@@ -429,9 +413,6 @@ export function RoutingSettings({
 
   const relativeAvailabilitySelected = settings.routingStrategy === "relative_availability";
   const selectableAccounts = accounts.filter((account) => isSingleAccountRoutingSelectable(account.status));
-  const selectedAccount = accounts.find((account) => account.accountId === settings.singleAccountId);
-  const blockedSelectedAccount =
-    selectedAccount !== undefined && !isSingleAccountRoutingSelectable(selectedAccount.status) ? selectedAccount : null;
   const firstAccountId = selectableAccounts[0]?.accountId;
   const additionalQuotaOverrides = settings.additionalQuotaRoutingPolicies ?? {};
   const knownAdditionalQuotaKeys = new Set((settings.additionalQuotaPolicies ?? []).map((policy) => policy.quotaKey));
@@ -602,17 +583,7 @@ export function RoutingSettings({
               <p className="text-xs text-muted-foreground">{t("settings.routing.strategy.description")}</p>
             </div>
             <div className="grid gap-2 md:grid-cols-2">
-              {[
-                "capacityWeighted",
-                "relativeAvailability",
-                "usageWeighted",
-                "roundRobin",
-                "fillFirst",
-                "sequentialDrain",
-                "resetDrain",
-                "singleAccount",
-              ].map((strategy) => {
-                const strategyValue = STRATEGY_GUIDE_VALUES[strategy];
+              {Object.entries(STRATEGY_GUIDE_VALUES).map(([strategy, strategyValue]) => {
                 const isSelected = settings.routingStrategy === strategyValue;
                 const isDisabled = strategyValue === "single_account" && !settings.singleAccountId && !firstAccountId;
                 return (
@@ -624,10 +595,10 @@ export function RoutingSettings({
                       if (strategyValue === "single_account") {
                         const selectedAccountId = settings.singleAccountId ?? firstAccountId;
                         if (!selectedAccountId) return;
-                        save({ routingStrategy: strategyValue as DashboardSettings["routingStrategy"], singleAccountId: selectedAccountId });
+                        save({ routingStrategy: strategyValue, singleAccountId: selectedAccountId });
                         return;
                       }
-                      save({ routingStrategy: strategyValue as DashboardSettings["routingStrategy"] });
+                      save({ routingStrategy: strategyValue });
                     }}
                     className={cn(
                       "space-y-0.5 rounded-md border p-2 text-left text-xs transition-colors",
@@ -823,36 +794,13 @@ export function RoutingSettings({
                   {t("settings.routing.singleAccount.description")}
                 </p>
               </div>
-              <Select
-                value={settings.singleAccountId ?? undefined}
-                onValueChange={(value) => save({ singleAccountId: value })}
-              >
-                <SelectTrigger
-                  aria-label={t("settings.routing.singleAccount.label")}
-                  className="h-8 w-full text-xs sm:w-64"
-                  disabled={busy || accountsLoading || selectableAccounts.length === 0}
-                >
-                  <SelectValue
-                    placeholder={
-                      accountsLoading
-                        ? t("settings.routing.singleAccount.loading")
-                        : t("settings.routing.singleAccount.placeholder")
-                    }
-                  />
-                </SelectTrigger>
-                <SelectContent align="end">
-                  {blockedSelectedAccount ? (
-                    <SelectItem key={blockedSelectedAccount.accountId} value={blockedSelectedAccount.accountId} disabled>
-                      {accountLabel(blockedSelectedAccount)}
-                    </SelectItem>
-                  ) : null}
-                  {selectableAccounts.map((account) => (
-                    <SelectItem key={account.accountId} value={account.accountId}>
-                      {accountLabel(account)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <SingleAccountRoutingSelect
+                accounts={accounts}
+                accountId={settings.singleAccountId}
+                busy={busy}
+                loading={accountsLoading}
+                onChange={(value) => save({ singleAccountId: value })}
+              />
               {!accountsLoading && selectableAccounts.length === 0 ? (
                 <p className="text-xs text-muted-foreground">{t("settings.routing.singleAccount.empty")}</p>
               ) : null}

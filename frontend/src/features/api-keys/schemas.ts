@@ -107,6 +107,13 @@ export const ApiKeyCreateResponseSchema = ApiKeySchema.extend({
   key: z.string(),
 });
 
+const ApiKeyAccountScopeSchema = z.object({
+  accountAssignmentScopeEnabled: z.boolean(),
+  assignedAccountIds: z.array(z.string()),
+});
+
+export type ApiKeyAccountScope = z.infer<typeof ApiKeyAccountScopeSchema>;
+
 export const ApiKeyUpdateRequestSchema = z.object({
   name: z.string().min(1).max(128).optional(),
   allowedModels: z.array(z.string()).nullable().optional(),
@@ -125,6 +132,7 @@ export const ApiKeyUpdateRequestSchema = z.object({
   expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
   isActive: z.boolean().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
+  accountScopeUpdate: ApiKeyAccountScopeSchema.extend({ expected: ApiKeyAccountScopeSchema }).optional(),
   assignedSourceIds: z.array(z.string()).optional(),
   limits: z.array(LimitRuleCreateSchema).optional(),
   resetUsage: z.boolean().optional(),

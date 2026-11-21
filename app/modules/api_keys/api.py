@@ -12,7 +12,7 @@ from app.core.auth.dependencies import (
 )
 from app.core.exceptions import DashboardBadRequestError, DashboardConflictError, DashboardNotFoundError
 from app.dependencies import ApiKeysContext, get_api_keys_context
-from app.modules.api_keys.repository import ApiKeyOwnerDisabledError
+from app.modules.api_keys.repository import ApiKeyAccountScope, ApiKeyOwnerDisabledError, ApiKeyScopeConflictError
 from app.modules.api_keys.schemas import (
     ApiKeyAccountCostResponse,
     ApiKeyCreateRequest,
@@ -25,6 +25,7 @@ from app.modules.api_keys.schemas import (
     LimitRuleResponse,
 )
 from app.modules.api_keys.service import (
+    ApiKeyAccountScopeUpdate,
     ApiKeyCreateData,
     ApiKeyData,
     ApiKeyNotFoundError,
@@ -205,6 +206,25 @@ async def update_api_key(
     limits_set = "limits" in fields or "weekly_token_limit" in fields
     limit_inputs = _build_limit_inputs(payload) if limits_set else None
 
+    scope = payload.account_scope_update
+    account_scope_update = None
+    if "account_scope_update" in fields:
+        if (
+            scope is None
+            or "assigned_account_ids" in fields
+            or (not scope.account_assignment_scope_enabled and scope.assigned_account_ids)
+            or (not scope.expected.account_assignment_scope_enabled and scope.expected.assigned_account_ids)
+        ):
+            raise DashboardBadRequestError("Invalid account scope update", code="invalid_api_key_payload")
+        account_scope_update = ApiKeyAccountScopeUpdate(
+            enabled=scope.account_assignment_scope_enabled,
+            account_ids=scope.assigned_account_ids,
+            expected=ApiKeyAccountScope(
+                scope.expected.account_assignment_scope_enabled,
+                frozenset(scope.expected.assigned_account_ids),
+            ),
+        )
+
     update = ApiKeyUpdateData(
         name=payload.name,
         name_set="name" in fields,
@@ -234,6 +254,7 @@ async def update_api_key(
         is_active_set="is_active" in fields,
         assigned_account_ids=payload.assigned_account_ids,
         assigned_account_ids_set="assigned_account_ids" in fields,
+        account_scope_update=account_scope_update,
         assigned_source_ids=payload.assigned_source_ids,
         assigned_source_ids_set="assigned_source_ids" in fields,
         limits=limit_inputs,
@@ -246,6 +267,8 @@ async def update_api_key(
         raise DashboardNotFoundError(str(exc)) from exc
     except ApiKeyValidationError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_api_key_payload") from exc
+    except ApiKeyScopeConflictError as exc:
+        raise DashboardConflictError(str(exc), code="api_key_account_scope_conflict") from exc
     except ApiKeyOwnerDisabledError as exc:
         raise DashboardConflictError(str(exc), code="owner_disabled") from exc
     if "is_active" in fields and payload.is_active is False and row.is_active is False:

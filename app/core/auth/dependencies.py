@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from ipaddress import ip_address, ip_network
 from typing import cast
@@ -48,7 +48,7 @@ from app.db.models import AccountStatus, DashboardSettings, DashboardUser, Dashb
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.api_keys.service import ApiKeyData, ApiKeyInvalidError, ApiKeysService
+from app.modules.api_keys.service import ApiKeyData, ApiKeyInvalidError, ApiKeysService, require_api_key_account_scope
 from app.modules.dashboard_auth.service import (
     DASHBOARD_SESSION_COOKIE,
     DashboardSessionState,
@@ -160,7 +160,21 @@ async def _validate_api_key_token(token: str) -> ApiKeyData:
         if cached.expires_at is not None and cached.expires_at <= utcnow():
             await cache.invalidate(token_hash)
         else:
-            return cached
+            # Cache invalidation is asynchronous across replicas. The
+            # committed scope must apply to the very next admission.
+            async with get_background_session() as session:
+                scope = await ApiKeysRepository(session).read_account_scope(cached.id)
+            if scope is None:
+                raise ProxyAuthError("Invalid API key")
+            if scope.enabled != cached.account_assignment_scope_enabled or scope.account_ids != set(
+                cached.assigned_account_ids
+            ):
+                cached = replace(
+                    cached,
+                    account_assignment_scope_enabled=scope.enabled,
+                    assigned_account_ids=sorted(scope.account_ids),
+                )
+            return require_api_key_account_scope(cached)
 
     version_before_read = cache.version
     async with get_background_session() as session:
@@ -168,7 +182,7 @@ async def _validate_api_key_token(token: str) -> ApiKeyData:
         try:
             validated = await service.validate_key(token)
             await cache.set(token_hash, validated, if_version=version_before_read)
-            return validated
+            return require_api_key_account_scope(validated)
         except ApiKeyInvalidError as exc:
             raise ProxyAuthError(str(exc)) from exc
 

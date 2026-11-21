@@ -655,6 +655,44 @@ def test_responses_websocket_route_rejects_disallowed_reasoning_before_upstream(
     assert event["error"]["code"] == "reasoning_effort_not_allowed"
 
 
+def test_responses_websocket_rechecks_empty_scope_on_an_open_connection(app_instance, monkeypatch):
+    async def no_upstream_selection(*args, **kwargs):
+        pytest.fail("An empty API-key account scope must deny before selecting an account")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_websocket_connect_account", no_upstream_selection)
+    with TestClient(app_instance, base_url="http://localhost", client=("127.0.0.1", 50000)) as client:
+        assert client.put("/api/settings", json={"apiKeyAuthEnabled": True}).status_code == 200
+        created = client.post("/api/api-keys/", json={"name": "websocket scope"})
+        assert created.status_code == 200
+        key = created.json()
+        key_path = f"/api/api-keys/{key['id']}"
+        headers = {"Authorization": f"Bearer {key['key']}"}
+        ws_path = "/backend-api/codex/responses"
+
+        with client.websocket_connect(ws_path, headers=headers) as websocket:
+            closed = client.patch(
+                key_path,
+                json={
+                    "accountScopeUpdate": {
+                        "accountAssignmentScopeEnabled": True,
+                        "assignedAccountIds": [],
+                        "expected": {"accountAssignmentScopeEnabled": False, "assignedAccountIds": []},
+                    }
+                },
+            )
+            assert closed.status_code == 200, closed.text
+            websocket.send_json(_websocket_response_create("turn after the scope save"))
+            event = websocket.receive_json()
+            assert event["type"] == "error"
+            assert event["status"] == 403
+            assert event["error"]["code"] == "api_key_account_scope_empty"
+
+        with pytest.raises(WebSocketDenialResponse) as denied, client.websocket_connect(ws_path, headers=headers):
+            pytest.fail("The handshake should have been denied")
+        assert denied.value.status_code == 403
+        assert denied.value.json()["error"]["code"] == "api_key_account_scope_empty"
+
+
 def _websocket_response_batch(
     response_id: str,
     *,

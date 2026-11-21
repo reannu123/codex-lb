@@ -24,6 +24,9 @@ import { useTimeFormatStore } from "@/hooks/use-time-format";
 
 // Route-level code splitting: only the visited page's chunk loads, instead
 // of one entry bundle carrying all six pages' code.
+const SimpleDashboardPage = lazy(() =>
+  import("@/features/dashboard/components/simple-dashboard-page").then((m) => ({ default: m.SimpleDashboardPage })),
+);
 const DashboardPage = lazy(() =>
   import("@/features/dashboard/components/dashboard-page").then((m) => ({ default: m.DashboardPage })),
 );
@@ -117,6 +120,7 @@ export default function App() {
             <Route path="/login" element={<Navigate to={signedInLoginDestination()} replace />} />
             <Route element={<RouteGuard />}>
               <Route path="/dashboard" element={<DashboardPage />} />
+              <Route path="/simple-dashboard" element={<SimpleDashboardPage />} />
               <Route path="/reports" element={<ReportsPage />} />
               <Route path="/accounts" element={<AccountsPage />} />
               <Route path="/automations" element={<AutomationsPage />} />

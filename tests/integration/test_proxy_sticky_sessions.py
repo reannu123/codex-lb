@@ -10,7 +10,9 @@ from typing import cast
 import pytest
 from sqlalchemy import text, update
 
+import app.core.auth.dependencies as auth_dependencies
 import app.modules.proxy.service as proxy_module
+from app.core.auth.api_key_cache import ApiKeyCache
 from app.core.crypto import TokenEncryptor
 from app.core.openai.models import OpenAIResponsePayload
 from app.core.utils.time import naive_utc_to_epoch, utcnow
@@ -1028,6 +1030,80 @@ async def test_proxy_codex_session_id_pins_responses_and_compact_without_sticky_
     response = await async_client.post("/backend-api/codex/responses", json=stream_payload, headers=headers)
     assert response.status_code == 200
     assert stream_seen == ["acc_sid_a", "acc_sid_a"]
+
+
+@pytest.mark.asyncio
+async def test_empty_key_scope_denies_new_work_on_an_existing_codex_owner(async_client, monkeypatch):
+    await _set_routing_settings(async_client, sticky_threads_enabled=False)
+    enabled = await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})
+    assert enabled.status_code == 200
+    owner = await _import_account(async_client, "acc_scope_owner", "scope-owner@example.com")
+    await _import_account(async_client, "acc_scope_fallback", "scope-fallback@example.com")
+    create = await async_client.post("/api/api-keys/", json={"name": "scope gate", "assignedAccountIds": [owner]})
+    assert create.status_code == 200
+    key = create.json()
+    key_path = f"/api/api-keys/{key['id']}"
+    headers = {
+        "Authorization": f"Bearer {key['key']}",
+        "session-id": "phase-two-session",
+        "thread-id": "phase-two-thread",
+    }
+    payload = {"model": "gpt-5.1", "instructions": "hello", "input": [], "stream": True}
+    committed_scope = {"accountAssignmentScopeEnabled": True, "assignedAccountIds": [owner]}
+    empty_scope = {"accountAssignmentScopeEnabled": True, "assignedAccountIds": []}
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    upstream_accounts: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, **kwargs):
+        upstream_accounts.append(account_id)
+        started.set()
+        await finish.wait()
+        yield 'data: {"type":"response.completed","response":{"id":"resp_scoped"}}\n\n'
+
+    # The writer invalidates its own cache. This cache models an ingress
+    # process that has yet to poll that invalidation.
+    replica_cache = ApiKeyCache[object](ttl_seconds=60)
+    monkeypatch.setattr(auth_dependencies, "get_api_key_cache", lambda: replica_cache)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    url = "/backend-api/codex/responses"
+    admitted = asyncio.create_task(async_client.post(url, json=payload, headers=headers))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        close_key = await async_client.patch(
+            key_path, json={"accountScopeUpdate": {**empty_scope, "expected": committed_scope}}
+        )
+        assert close_key.status_code == 200, close_key.text
+        assert close_key.json()["accountAssignmentScopeEnabled"] is True
+        assert close_key.json()["assignedAccountIds"] == []
+
+        for route in (url, f"{url}/compact"):
+            denied = await async_client.post(route, json=payload, headers=headers)
+            assert denied.status_code == 403
+            assert denied.json()["error"]["code"] == "api_key_account_scope_empty"
+        assert upstream_accounts == ["acc_scope_owner"]
+
+        stale = await async_client.patch(
+            key_path,
+            json={"name": "stale edit", "accountScopeUpdate": {**committed_scope, "expected": committed_scope}},
+        )
+        assert stale.status_code == 409
+        assert stale.json()["error"]["code"] == "api_key_account_scope_conflict"
+    finally:
+        finish.set()
+        first = await asyncio.wait_for(admitted, timeout=5)
+    assert first.status_code == 200
+    assert "response.completed" in first.text
+
+    reopen = await async_client.patch(
+        key_path, json={"accountScopeUpdate": {**committed_scope, "expected": empty_scope}}
+    )
+    assert reopen.status_code == 200
+    assert reopen.json()["name"] == "scope gate"
+    assert reopen.json()["assignedAccountIds"] == [owner]
+    after = await async_client.post(url, json=payload, headers=headers)
+    assert after.status_code == 200
+    assert upstream_accounts == ["acc_scope_owner", "acc_scope_owner"]
 
 
 @pytest.mark.asyncio

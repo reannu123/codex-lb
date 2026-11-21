@@ -27,6 +27,15 @@ Keys can also be scoped to specific accounts, so a key draws quota only from the
 
 ![API keys with assigned accounts](screenshots/apis-assigned-accounts.jpg)
 
+To change the account scope of an existing key, open **Advanced → Simple Dashboard**. Switch
+accounts on or off, then save the scope. A fixed selection includes only those accounts. Choose
+**Use all accounts, including future accounts** to include newly added accounts as they become eligible.
+
+Saving a fixed scope with no accounts denies new requests authenticated with that key with
+`403 api_key_account_scope_empty`. Already admitted requests can finish. Grant an account and save
+again to reopen the same key. If the global API key auth setting allows an anonymous request, that
+request still follows the existing anonymous access rules.
+
 ## Reasoning effort policies
 
 A key can either enforce one reasoning effort or allow a selected non-empty set of client-requested efforts.

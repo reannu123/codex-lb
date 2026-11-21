@@ -1,3 +1,4 @@
+import { ManualWarmupConfirmDialog } from "@/features/accounts/components/manual-warmup-confirm-dialog";
 import { Suspense, lazy, useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
@@ -308,12 +309,8 @@ export function AccountsPage() {
         />
       ) : null}
 
-      <ConfirmDialog
+      <ManualWarmupConfirmDialog
         open={manualWarmupDialog.open}
-        title={t("accounts.manualWarmupDialog.title")}
-        description={t("accounts.manualWarmupDialog.description")}
-        confirmLabel={t("accounts.actions.manualWarmup")}
-        cancelLabel={t("common.cancel")}
         onOpenChange={manualWarmupDialog.onOpenChange}
         onConfirm={() => {
           if (!manualWarmupDialog.data) return;

@@ -454,11 +454,8 @@ async def test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts(asyn
     assert listed_key["pooledRemainingPercentSecondary"] is None
 
     usage = await async_client.get("/v1/usage", headers={"Authorization": f"Bearer {key}"})
-    assert usage.status_code == 200
-    assert usage.json()["account_pool_usage"] == {
-        "primary": None,
-        "secondary": None,
-    }
+    assert usage.status_code == 403
+    assert usage.json()["error"]["code"] == "api_key_account_scope_empty"
 
     called = False
 
@@ -476,9 +473,43 @@ async def test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts(asyn
         json={"model": _TEST_MODELS[0], "instructions": "hi", "input": []},
     )
 
-    assert response.status_code == 503
-    assert response.json()["error"]["code"] == "no_accounts"
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "api_key_account_scope_empty"
     assert called is False
+
+
+@pytest.mark.asyncio
+async def test_concurrent_explicit_scope_saves_commit_only_one_baseline(async_client):
+    account_id = await _import_account(async_client, "acc-scope-baseline", "baseline@example.com")
+    created = await async_client.post("/api/api-keys", json={"name": "baseline", "assignedAccountIds": [account_id]})
+    assert created.status_code == 200
+    key_path = f"/api/api-keys/{created.json()['id']}"
+    expected = {"accountAssignmentScopeEnabled": True, "assignedAccountIds": [account_id]}
+
+    async def save(enabled: bool, name: str):
+        return await async_client.patch(
+            key_path,
+            json={
+                "name": name,
+                "accountScopeUpdate": {
+                    "accountAssignmentScopeEnabled": enabled,
+                    "assignedAccountIds": [],
+                    "expected": expected,
+                },
+            },
+        )
+
+    replies = await asyncio.gather(save(True, "closed"), save(False, "reopened to all"))
+    assert sorted(reply.status_code for reply in replies) == [200, 409]
+    winning = next(reply.json() for reply in replies if reply.status_code == 200)
+    rejected = next(reply.json() for reply in replies if reply.status_code == 409)
+    assert rejected["error"]["code"] == "api_key_account_scope_conflict"
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    saved = listed.json()[0]
+    assert saved["name"] == winning["name"]
+    assert saved["accountAssignmentScopeEnabled"] == winning["accountAssignmentScopeEnabled"]
+    assert saved["assignedAccountIds"] == []
 
 
 @pytest.mark.asyncio
