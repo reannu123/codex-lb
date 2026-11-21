@@ -5591,6 +5591,87 @@ async def test_forwarded_bridge_reuses_reader_with_each_turns_signed_price(async
 
 
 @pytest.mark.asyncio
+async def test_rejected_owner_forward_recovers_locally_with_admission_price(async_client, app_instance, monkeypatch):
+    from app.core.usage.price_overrides import BaseRates, get_subscription_pricing, install_overrides
+    from app.modules.proxy._service.http_bridge import owner_forwarding as owner_forwarding_module
+
+    _install_bridge_settings_with_limits(
+        monkeypatch, enabled=True, instance_id="instance-b", instance_ring=["instance-a", "instance-b"]
+    )
+    await _import_account(async_client, "acc_forward_retry_price", "forward-retry-price@example.com")
+    service = get_proxy_service_for_app(app_instance)
+    model = "gpt-5.1"
+    index = 0
+    while (
+        await proxy_module._http_bridge_owner_instance(
+            proxy_module._HTTPBridgeSessionKey("session_header", f"forward-retry-price-{index}", None),
+            proxy_module.get_settings(),
+        )
+        != "instance-a"
+    ):
+        index += 1
+    session_id = f"forward-retry-price-{index}"
+
+    class Ring:
+        async def list_active(self, *, require_endpoint: bool = False) -> list[str]:
+            return ["instance-a", "instance-b"]
+
+        async def resolve_endpoint(self, instance_id: str) -> str:
+            return f"http://{instance_id}"
+
+    admission, saved_mid_request = BaseRates(2, 0.5, 4), BaseRates(60, 60, 60)
+    quotes: list[object] = []
+
+    async def reject_after_peer_save(*, payload, **_kwargs: Any) -> AsyncGenerator[str, None]:
+        # The origin quotes before dispatch; a peer save then lands before the
+        # owner rejects, so the local retry must keep the admission view.
+        quote = get_subscription_pricing(payload.model)
+        quotes.append(BaseRates.from_price(quote[1]) if quote is not None else None)
+        install_overrides({model: saved_mid_request})
+        raise owner_forwarding_module._OwnerForwardRequestError(
+            proxy_module.ProxyResponseError(
+                503,
+                proxy_module.openai_error("bridge_owner_unreachable", "owner rejected", error_type="server_error"),
+            ),
+            outcome=owner_forwarding_module._OwnerForwardOutcome.RECEIVER_REJECTED,
+        )
+        yield ""
+
+    async def connect(*args: Any, **kwargs: Any) -> _FakeBridgeUpstreamWebSocket:
+        return _FakeBridgeUpstreamWebSocket("resp_forward_retry_price")
+
+    original_ring = service._ring_membership
+    service._ring_membership = cast(Any, Ring())
+    monkeypatch.setattr(service, "_forward_http_bridge_request_to_owner", reject_after_peer_save)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    install_overrides({model: admission})
+    try:
+        events = await _collect_sse_events(
+            async_client,
+            "/backend-api/codex/responses",
+            json_body={"model": model, "instructions": "Return exactly OK.", "input": "retry", "stream": True},
+            headers={"session_id": session_id},
+        )
+        current = get_subscription_pricing(model)
+        assert current is not None and BaseRates.from_price(current[1]) == saved_mid_request
+        await service.drain_persistence_tasks(timeout_seconds=_TEST_SYNC_TIMEOUT_SECONDS)
+    finally:
+        service._ring_membership = original_ring
+        install_overrides({})
+
+    assert events[-1]["type"] == "response.completed", events
+    assert quotes == [admission]
+    async with SessionLocal() as session:
+        log = (
+            await session.scalars(select(RequestLog).where(RequestLog.request_id == "resp_forward_retry_price_1"))
+        ).one()
+    # 4 uncached input at 2, 20 cached at 0.5, and 2 output at 4 (microdollars).
+    assert log.cost_status == "priced"
+    assert (log.cost_input_usd, log.cost_cached_input_usd, log.cost_output_usd) == pytest.approx((8e-6, 10e-6, 8e-6))
+    assert log.cost_usd == pytest.approx(26e-6)
+
+
+@pytest.mark.asyncio
 async def test_forwarded_recovery_uses_durable_owner_and_strips_stale_affinity(
     async_client,
     app_instance,

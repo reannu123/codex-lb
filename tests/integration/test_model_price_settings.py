@@ -379,3 +379,53 @@ async def test_internal_bridge_route_uses_origin_quote_during_stream(async_clien
     assert response.text == "data: synthetic\n\n"
     assert seen == [(payload.model, origin_price), (payload.model, origin_price)]
     assert get_subscription_pricing(payload.model) != (payload.model, origin_price)
+
+
+async def test_image_relabel_reprices_with_admission_view(
+    async_client, app_instance, subscription_cost_key, monkeypatch
+):
+    from app.core.openai.host_models import resolve_default_host_model
+    from app.core.usage.price_overrides import BaseRates
+
+    key_id, headers = subscription_cost_key
+    image_model, host_model = "gpt-image-2", resolve_default_host_model()
+    usage = {"input_tokens": 1000, "output_tokens": 100}
+
+    async def upstream(*args, **kwargs) -> AsyncIterator[str]:
+        # A save committed after admission must not reach this request's
+        # settlement or the delayed public-model relabel of its log row.
+        install_overrides({image_model: BaseRates(100, 0, 100), host_model: BaseRates(100, 0, 100)})
+        item = {"type": "image_generation_call", "id": "ig_price", "status": "completed", "result": "B64"}
+        yield f"data: {json.dumps({'type': 'response.output_item.done', 'output_index': 0, 'item': item})}\n\n"
+        response = {"id": "resp_image_price", "status": "completed", "usage": usage, "tool_usage": {"image_gen": usage}}
+        yield f"data: {json.dumps({'type': 'response.completed', 'response': response})}\n\n"
+
+    async def fresh(self, account, **kwargs):
+        return account
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", upstream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fresh)
+    install_overrides({image_model: BaseRates(2, 0, 8), host_model: BaseRates(1, 0, 1)})
+    response = await async_client.post(
+        "/v1/images/generations",
+        headers=headers,
+        json={"model": image_model, "prompt": "synthetic", "size": "1024x1024", "quality": "low"},
+    )
+    assert response.status_code == 200, response.text
+    await app_instance.state.proxy_service.drain_persistence_tasks(timeout_seconds=5)
+
+    async with SessionLocal() as session:
+        log = (await session.scalars(select(RequestLog).where(RequestLog.api_key_id == key_id))).one()
+        assert log.model == image_model
+        assert log.cost_status == "priced"
+        # 1000 input at 2 and 100 output at 8 per million tokens, not the host or mid-request rates.
+        # Without a cached-token count the input split stays unknown; the total does not.
+        assert (log.cost_input_usd, log.cost_cached_input_usd) == (None, None)
+        assert log.cost_output_usd == pytest.approx(0.0008)
+        assert log.cost_usd == pytest.approx(0.0028)
+        reservation = await session.scalar(
+            select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id)
+        )
+        assert reservation is not None
+        assert (reservation.status, reservation.cost_microdollars) == ("finalized", 2800)
+        assert await session.scalar(select(ApiKeyLimit.current_value).where(ApiKeyLimit.api_key_id == key_id)) == 2800
