@@ -22,6 +22,9 @@ GUARD = "github.repository == 'Soju06/codex-lb'"
 KEPT: dict[str, set[str]] = {
     "simplicity-budgets.yml": {"budgets"},
     "docs.yml": {"build"},
+    # Upstream requires this job to run unconditionally on every PR
+    # (tests/unit/test_ci_workflow_required_checks.py); it passes on the fork.
+    "ci.yml": {"openspec"},
 }
 
 

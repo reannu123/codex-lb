@@ -82,7 +82,6 @@ jobs:
 
   openspec:
     name: OpenSpec validation
-    if: github.repository == 'Soju06/codex-lb'
     runs-on: ubuntu-24.04
 
     steps:

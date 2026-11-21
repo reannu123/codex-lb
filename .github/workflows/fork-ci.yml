@@ -133,6 +133,11 @@ jobs:
           make frontend-build
           uv sync --dev --frozen
           mapfile -t targets < <(grep -vE '^\s*(#|$)' .github/fork/focused-integration-tests.txt)
+          missing=0
+          for target in "${targets[@]}"; do
+            [ -f "${target}" ] || { echo "::error::focused test ${target} is listed but missing"; missing=1; }
+          done
+          [ "${missing}" -eq 0 ] && [ "${#targets[@]}" -gt 0 ]
           uv run pytest -q -ra -o faulthandler_timeout=300 --timeout=180 --timeout-method=thread "${targets[@]}"
           make migration-check
 
