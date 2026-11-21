@@ -152,6 +152,8 @@ async def subscription_cost_key(async_client, monkeypatch):
 async def test_subscription_route_pins_price_and_preserves_recorded_history(
     async_client, app_instance, subscription_cost_key, monkeypatch
 ):
+    from app.core.usage import pricing_catalog as catalog
+
     key_id, headers = subscription_cost_key
     entered, release = asyncio.Event(), asyncio.Event()
     counter = 0
@@ -186,8 +188,30 @@ async def test_subscription_route_pins_price_and_preserves_recorded_history(
         assert "response.completed" in response.text, response.text
 
     await request()
+    await app_instance.state.proxy_service.drain_persistence_tasks(timeout_seconds=5)
     row = _price_row(await async_client.put(f"{_PRICES}/{_MODEL}", json=_SYNTHETIC_RATES))
     assert row["source"] == "local_override"
+    # Exercise repair while both the local override and a new upstream rate
+    # are available. Newly recorded missing-price rows are outside its scope.
+    with monkeypatch.context() as pricing:
+        pricing.setattr(catalog, "_prices", {_MODEL: ModelPrice(5, 10, 1)})
+        async with SessionLocal() as session:
+            legacy = RequestLog(
+                request_id="legacy-repair-control", model=_MODEL, status="success", input_tokens=1000, output_tokens=100
+            )
+            session.add(legacy)
+            await session.commit()
+            batch = await backfill_missing_costs(session)
+            assert (batch.scanned, batch.updated) == (1, 1)
+            await session.refresh(legacy)
+            assert legacy.cost_usd == pytest.approx(0.006)
+            logs = await session.scalars(select(RequestLog).where(RequestLog.request_id == "resp_model_prices_1"))
+            original = logs.one()
+            assert original.cost_status == "missing_price"
+            assert original.cost_usd is None
+        history = (await async_client.get("/api/request-logs")).json()["requests"]
+        (original_row,) = [item for item in history if item["requestId"] == "resp_model_prices_1"]
+        assert original_row["costUsd"] is None and original_row["costStatus"] == "missing_price"
     pending = asyncio.create_task(request())
     try:
         await asyncio.wait_for(entered.wait(), 10)
