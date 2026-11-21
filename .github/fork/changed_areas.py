@@ -83,10 +83,14 @@ AREAS: dict[str, list[str]] = {
 
 def _changed_files(base: str, head: str) -> list[str]:
     subprocess.run(["git", "fetch", "--no-tags", "--depth=200", "origin", base], check=False, capture_output=True)
+    # -z: NUL-delimited raw paths. Without it Git quotes paths containing
+    # non-ASCII characters or tabs, and the quoted form never matches a glob.
     out = subprocess.run(
-        ["git", "diff", "--name-only", "--no-renames", f"{base}...{head}"], check=True, capture_output=True, text=True
+        ["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...{head}"],
+        check=True,
+        capture_output=True,
     ).stdout
-    return [line for line in out.splitlines() if line]
+    return [path.decode("utf-8", "surrogateescape") for path in out.split(b"\0") if path]
 
 
 def main() -> None:
