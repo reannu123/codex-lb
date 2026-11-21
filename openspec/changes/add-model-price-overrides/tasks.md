@@ -1,7 +1,7 @@
 ## 1. Effective pricing and persistence
 
 - [ ] 1.1 Add catalog provenance through live merge, bundled and built-in selection, and last-good restore. Verify v1 cache compatibility, newer-bundle precedence, partial refresh, compatible tier supplementation, and offline restart.
-- [ ] 1.2 Add an additive SQLite/PostgreSQL migration for exact-ID base overrides and recorded subscription cost data. Verify migration topology on current main and upgrade/downgrade with legacy NULL, zero, and positive rows.
+- [x] 1.2 Add an additive SQLite/PostgreSQL migration for exact-ID base overrides and recorded subscription cost data. Verify migration topology on current main and upgrade/downgrade with legacy NULL, zero, and positive rows.
 - [ ] 1.3 Compose exact overrides with existing upstream matching and tier precedence. Cover exact case folding, dated and alias independence, unknown minor IDs, override-only IDs, cached-input zero and inheritance, Priority/Fast, Flex, long-context threshold boundaries, and multipliers.
 
 ## 2. Future request accounting and retained history
@@ -22,13 +22,13 @@
 
 ## Local implementation status (2026-11-22)
 
-Unchecked items are implemented but not yet fully verified for every listed case.
+Unchecked items have remaining implementation or verification work.
 
 - 1.1: Source labels cover live, last-good cache, bundled, and built-in. No new tests for merge, restore, or partial-refresh provenance.
-- 1.2: Additive migration; SQLite upgrade/downgrade round trip and migration topology check pass. PostgreSQL not exercised locally.
+- 1.2: SQLite and PostgreSQL 16 preserve legacy NULL, zero, and positive costs across upgrade and downgrade. Both engines reapply cleanly over an override table created from ORM metadata, preserving its row. Topology passes against fork main at `cf47701c`. The SQLite test's handwritten bootstrap DDL had omitted `NOT NULL` from `model_id`; the parent had no unrelated schema drift.
 - 1.3: Exact-ID override, dated-ID independence, override-only IDs, and the catalog-tier flag are tested. Flex, Priority multiplier, and long-context boundary cases are not.
 - 2.1: Admission view is pinned for HTTP (including mid-request save), WebSocket per turn (reservation and finalization, mutation-checked), internal bridge origin quotes, and signed forward headers. Peer reload goes through the invalidation poller. Image relabeling has no price-specific handling or test.
-- 2.2: Ledger covers missing, pinned positive, explicit zero, and sub-microdollar positive. Cancelled/failed requests, exactly-once settlement, and source-backed audio are not separately tested.
+- 2.2: HTTP route tests verify the unknown-price hold, pinned positive settlement, zero hold, one-microdollar minimum hold for a tiny positive estimate, and refunds after cancellation or a failed upstream event. Replaying finalization and release leaves the original charge and limit counter unchanged. Full route-level verification of tier-specific and direct accounting with overrides and same-ID Model Source pricing remains open.
 - 2.3: Unrounded totals/components and cost status are recorded. Repair is limited to legacy unclassified NULLs at upstream-only prices. Rollup mirroring retry/restart is not newly tested.
-- 3.3: Browser save, zero, six-decimal, restart persistence, override-over-catalog, and clear-to-catalog/missing all verified against a local instance. Request-table rendering was verified in component tests only: no live upstream account, so no real synthetic traffic.
-- 4.1: Focused backend/frontend suites, lint, ty, migration topology, and strict validation pass. Spec sync and archive are pending approval.
+- 3.3: Browser save, zero, six-decimal, restart persistence, override-over-catalog, and clear-to-catalog/missing all verified against a local instance. Synthetic GPT-6.2 Sol requests exercise accounting through the HTTP route with a stubbed upstream. The combined dashboard, traffic, and restart flow and the request-path database-read check remain open.
+- 4.1: Focused backend/frontend suites, lint, ty, migration topology, and strict validation pass. Complete requirement coverage remains open as listed above.

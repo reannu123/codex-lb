@@ -5,6 +5,7 @@ import json
 from collections.abc import AsyncIterator
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import select
 
 import app.core.auth.dependencies as dashboard_auth
@@ -15,8 +16,10 @@ from app.core.cache.invalidation import NAMESPACE_SETTINGS, CacheInvalidationPol
 from app.core.usage.price_overrides import get_subscription_pricing, install_overrides
 from app.core.usage.pricing import ModelPrice
 from app.core.usage.pricing_catalog import install_prices
-from app.db.models import ApiKeyUsageReservation, RequestLog
+from app.db.models import ApiKeyLimit, ApiKeyUsageReservation, RequestLog
 from app.db.session import SessionLocal
+from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.api_keys.service import ApiKeysService
 from app.modules.request_logs.cost_backfill import backfill_missing_costs
 from app.modules.settings.model_prices_cache import refresh_model_price_overrides
 from tests.integration.test_proxy_responses import _make_auth_json
@@ -112,7 +115,8 @@ async def test_model_prices_settings_authorization_validation_and_reload(
         install_overrides({})
 
 
-async def test_subscription_route_pins_price_and_preserves_recorded_history(async_client, db_setup, monkeypatch):
+@pytest_asyncio.fixture
+async def subscription_cost_key(async_client, monkeypatch):
     from app.core.usage import pricing_catalog as catalog
 
     monkeypatch.setattr(catalog, "_prices", None)
@@ -138,7 +142,17 @@ async def test_subscription_route_pins_price_and_preserves_recorded_history(asyn
         },
     )
     assert key.status_code == 200
-    headers = {"Authorization": f"Bearer {key.json()['key']}"}
+    payload = key.json()
+    try:
+        yield payload["id"], {"Authorization": f"Bearer {payload['key']}"}
+    finally:
+        install_overrides({})
+
+
+async def test_subscription_route_pins_price_and_preserves_recorded_history(
+    async_client, app_instance, subscription_cost_key, monkeypatch
+):
+    key_id, headers = subscription_cost_key
     entered, release = asyncio.Event(), asyncio.Event()
     counter = 0
 
@@ -171,40 +185,135 @@ async def test_subscription_route_pins_price_and_preserves_recorded_history(asyn
         assert response.status_code == 200, response.text
         assert "response.completed" in response.text, response.text
 
+    await request()
+    row = _price_row(await async_client.put(f"{_PRICES}/{_MODEL}", json=_SYNTHETIC_RATES))
+    assert row["source"] == "local_override"
+    pending = asyncio.create_task(request())
     try:
-        await request()
-        row = _price_row(await async_client.put(f"{_PRICES}/{_MODEL}", json=_SYNTHETIC_RATES))
-        assert row["source"] == "local_override"
-        pending = asyncio.create_task(request())
-        try:
-            await asyncio.wait_for(entered.wait(), 10)
-            zero = dict.fromkeys(_SYNTHETIC_RATES, "0")
-            assert _price_row(await async_client.put(f"{_PRICES}/{_MODEL}", json=zero))["source"] == "local_override"
-        finally:
-            release.set()
-            await pending
-
-        await request()
-        small = {**zero, "inputPer1M": "0.0001"}
-        await async_client.put(f"{_PRICES}/{_MODEL}", json=small)
-        await request()
-        assert _price_row(await async_client.delete(f"{_PRICES}/{_MODEL}"))["source"] == "missing"
-
-        async with SessionLocal() as session:
-            assert (await backfill_missing_costs(session)).updated == 0
-            ledger = (
-                await session.scalars(select(ApiKeyUsageReservation).order_by(ApiKeyUsageReservation.created_at))
-            ).all()
-            assert [row.cost_microdollars for row in ledger] == [0, 2600, 0, 0]
-        history = (await async_client.get("/api/request-logs")).json()["requests"]
-        by_id = {item["requestId"]: item for item in history}
-        first, pinned, zero_cost, tiny = (by_id[f"resp_model_prices_{i}"] for i in range(1, 5))
-        assert first["costUsd"] is None and first["costStatus"] == "missing_price"
-        assert pinned["costUsd"] == pytest.approx(0.0026)
-        assert zero_cost["costUsd"] == 0 and zero_cost["costStatus"] == "priced"
-        assert tiny["costUsd"] == pytest.approx(0.00000009)
+        await asyncio.wait_for(entered.wait(), 10)
+        zero = dict.fromkeys(_SYNTHETIC_RATES, "0")
+        assert _price_row(await async_client.put(f"{_PRICES}/{_MODEL}", json=zero))["source"] == "local_override"
     finally:
-        install_overrides({})
+        release.set()
+        await pending
+
+    await request()
+    small = {**zero, "inputPer1M": "0.0001"}
+    assert _price_row(await async_client.put(f"{_PRICES}/{_MODEL}", json=small))["source"] == "local_override"
+    await request()
+    assert _price_row(await async_client.delete(f"{_PRICES}/{_MODEL}"))["source"] == "missing"
+
+    await app_instance.state.proxy_service.drain_persistence_tasks(timeout_seconds=5)
+    async with SessionLocal() as session:
+        assert (await backfill_missing_costs(session)).updated == 0
+        ledger = (
+            await session.scalars(select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id))
+        ).all()
+        assert [row.status for row in ledger] == ["finalized"] * 4
+        (paid,) = [row for row in ledger if row.cost_microdollars == 2600]
+        zero_hold, tiny_hold, unknown_hold = sorted(
+            row.items[0].reserved_delta for row in ledger if row.cost_microdollars == 0
+        )
+        assert (zero_hold, tiny_hold) == (0, 1)
+        assert 0 < paid.items[0].reserved_delta < unknown_hold
+        settled_id = paid.id
+    # A duplicate completion or late cleanup must leave the original charge intact.
+    async with SessionLocal() as session:
+        usage = ApiKeysService(ApiKeysRepository(session))
+        await usage.finalize_usage_reservation(
+            settled_id, model=_MODEL, input_tokens=5000, output_tokens=500, cost_microdollars=9999
+        )
+        await usage.release_usage_reservation(settled_id)
+    async with SessionLocal() as session:
+        settled = await session.get(ApiKeyUsageReservation, settled_id)
+        assert settled is not None
+        assert settled.status == "finalized"
+        assert settled.cost_microdollars == 2600
+        assert settled.items[0].actual_delta == 2600
+        assert await session.scalar(select(ApiKeyLimit.current_value).where(ApiKeyLimit.api_key_id == key_id)) == 2600
+    history = (await async_client.get("/api/request-logs")).json()["requests"]
+    by_id = {item["requestId"]: item for item in history}
+    first, pinned, zero_cost, tiny = (by_id[f"resp_model_prices_{i}"] for i in range(1, 5))
+    assert first["costUsd"] is None and first["costStatus"] == "missing_price"
+    assert pinned["costUsd"] == pytest.approx(0.0026)
+    assert zero_cost["costUsd"] == 0 and zero_cost["costStatus"] == "priced"
+    assert tiny["costUsd"] == pytest.approx(0.00000009)
+
+
+@pytest.mark.parametrize("termination", ["cancelled", "failed"])
+async def test_subscription_stream_termination_refunds_local_price_hold(
+    async_client, app_instance, subscription_cost_key, monkeypatch, termination
+):
+    key_id, headers = subscription_cost_key
+    async with SessionLocal() as session:
+        session.add(RequestLog(request_id="previous-observation", model=_MODEL, status="success"))
+        await session.commit()
+    assert (
+        _price_row(await async_client.put(f"{_PRICES}/{_MODEL}", json=_SYNTHETIC_RATES))["source"] == "local_override"
+    )
+    entered, fail = asyncio.Event(), asyncio.Event()
+
+    async def upstream(*args, **kwargs) -> AsyncIterator[str]:
+        yield 'data: {"type":"response.created","response":{"id":"resp_price_terminated","output":[]}}\n\n'
+        entered.set()
+        await fail.wait()
+        response = {
+            "type": "response.failed",
+            "response": {
+                "id": "resp_price_terminated",
+                "status": "failed",
+                "error": {"code": "invalid_prompt", "message": "Synthetic failure"},
+            },
+        }
+        yield f"data: {json.dumps(response)}\n\n"
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", upstream)
+    pending = asyncio.create_task(
+        async_client.post(
+            "/v1/responses",
+            headers=headers,
+            json={"model": _MODEL, "instructions": "", "input": "synthetic input", "stream": True},
+        )
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        async with SessionLocal() as session:
+            reservation = await session.scalar(
+                select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id)
+            )
+            assert reservation is not None
+            assert reservation.status == "reserved"
+            hold = reservation.items[0].reserved_delta
+            assert hold > 0
+            limit = await session.get(ApiKeyLimit, reservation.items[0].limit_id)
+            assert limit is not None and limit.current_value == hold
+            reservation_id = reservation.id
+        if termination == "cancelled":
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+        else:
+            fail.set()
+            response = await asyncio.wait_for(pending, 5)
+            assert response.status_code == 200, response.text
+            assert "response.failed" in response.text
+    finally:
+        if not pending.done():
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
+    await app_instance.state.proxy_service.drain_persistence_tasks(timeout_seconds=5)
+    async with SessionLocal() as session:
+        reservation = await session.get(ApiKeyUsageReservation, reservation_id)
+        assert reservation is not None
+        assert reservation.status == "released"
+        assert reservation.cost_microdollars is None
+        limit = await session.get(ApiKeyLimit, reservation.items[0].limit_id)
+        assert limit is not None and limit.current_value == 0
+        logs = await session.scalars(select(RequestLog).where(RequestLog.api_key_id == key_id))
+        log = logs.one()
+        assert log.status == ("cancelled" if termination == "cancelled" else "error")
+        assert log.cost_usd is None and log.cost_status == "usage_unavailable"
 
 
 async def test_internal_bridge_route_uses_origin_quote_during_stream(async_client, monkeypatch):
