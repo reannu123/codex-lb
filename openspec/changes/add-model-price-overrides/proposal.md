@@ -9,6 +9,10 @@ Switchboard operators need to see which token rates codex-lb actually uses and s
 - Apply a consistent pricing view to future request estimates and API-key cost accounting. Preserve recorded history and distinguish missing, exact zero, and small positive costs.
 - Keep configured Model Source pricing and existing catalog tier precedence. Phase 3 adds three base-rate fields.
 
+## Verification Scope
+
+Requirements are verified by unit, route, migration, and component tests on disposable SQLite and PostgreSQL stores, plus a local browser pass. One combined live session covering the dashboard, synthetic traffic, and a process restart together is deferred to rollout verification of the deployed image (see `tasks.md`).
+
 ## Capabilities
 
 ### New Capabilities

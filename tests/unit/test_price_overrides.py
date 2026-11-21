@@ -77,3 +77,31 @@ def test_override_keeps_catalog_tier_fields_and_leaves_catalog_untouched() -> No
     assert (price.input_per_1m, price.cached_input_per_1m, price.output_per_1m) == (3, 0, 6)
     assert (price.priority_input_per_1m, price.long_context_threshold_tokens) == (8, 1000)
     assert _microdollars(PricingView(_CATALOG, {}), "gpt-tiered", None, 1000) == 900 * 4 + 100 * 1 + 100 * 10
+
+
+def test_unknown_minor_ids_stay_missing_and_overrides_are_alias_independent(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.core.usage import pricing_catalog as catalog
+
+    monkeypatch.setattr(catalog, "_prices", None)
+    upstream = catalog.get_active_prices()
+    sol = upstream["gpt-5.6-sol"]
+    base = PricingView(upstream, {})
+    assert base.resolve("gpt-5.6") == ("gpt-5.6-sol", sol)
+    # An unknown minor ID is missing, never priced through the legacy gpt-5 family.
+    assert base.resolve("gpt-5.99") is None
+    view = PricingView(
+        upstream,
+        {"gpt-5": BaseRates(1, 1, 1), "gpt-5.6": BaseRates(2, 2, 2), "gpt-5.99": BaseRates(3, 0, 9)},
+    )
+    assert view.resolve("gpt-5.99") == ("gpt-5.99", ModelPrice(3, 9, 0))
+    assert view.resolve("gpt-5.99-2026-09-10") is None
+    assert view.resolve("gpt-5.98") is None
+    # The alias override reprices only the alias ID; its target and dated siblings keep upstream rates.
+    assert view.resolve("GPT-5.6") == ("gpt-5.6", BaseRates(2, 2, 2).apply(sol))
+    assert view.resolve("gpt-5.6-sol") == ("gpt-5.6-sol", sol)
+    assert view.resolve("gpt-5.6-sol-2026-11-01") == base.resolve("gpt-5.6-sol-2026-11-01")
+    # Overriding the target likewise leaves the alias on upstream resolution.
+    target_only = PricingView(upstream, {"gpt-5.6-sol": BaseRates(4, 0, 8)})
+    assert target_only.resolve("gpt-5.6-sol") == ("gpt-5.6-sol", BaseRates(4, 0, 8).apply(sol))
+    assert target_only.resolve("gpt-5.6") == ("gpt-5.6-sol", sol)
+    assert target_only.resolve("gpt-5.6-terra") == base.resolve("gpt-5.6-terra")

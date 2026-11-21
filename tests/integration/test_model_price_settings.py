@@ -429,3 +429,224 @@ async def test_image_relabel_reprices_with_admission_view(
         assert reservation is not None
         assert (reservation.status, reservation.cost_microdollars) == ("finalized", 2800)
         assert await session.scalar(select(ApiKeyLimit.current_value).where(ApiKeyLimit.api_key_id == key_id)) == 2800
+
+
+async def test_limit_free_key_records_admission_price(async_client, app_instance, monkeypatch):
+    from app.core.usage import pricing_catalog as catalog
+    from app.core.usage.price_overrides import BaseRates
+
+    monkeypatch.setattr(catalog, "_prices", None)
+    monkeypatch.setattr(catalog, "_price_sources", {})
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={
+            "auth_json": (
+                "auth.json",
+                json.dumps(_make_auth_json("limit-free", "free@example.com")),
+                "application/json",
+            )
+        },
+    )
+    assert imported.status_code == 200, imported.text
+    assert (await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})).status_code == 200
+    key = await async_client.post("/api/api-keys", json={"name": "limit-free"})
+    assert key.status_code == 200, key.text
+    key_id, secret = key.json()["id"], key.json()["key"]
+
+    async def upstream(*args, **kwargs) -> AsyncIterator[str]:
+        install_overrides({_MODEL: BaseRates(100, 100, 100)})
+        response = {
+            "id": "resp_limit_free_price",
+            "object": "response",
+            "status": "completed",
+            "output": [],
+            "usage": {"input_tokens": 1000, "input_tokens_details": {"cached_tokens": 100}, "output_tokens": 100},
+        }
+        yield f"data: {json.dumps({'type': 'response.completed', 'response': response})}\n\n"
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", upstream)
+    install_overrides({_MODEL: BaseRates(2, 0, 8)})
+    try:
+        response = await async_client.post(
+            "/v1/responses",
+            headers={"Authorization": f"Bearer {secret}"},
+            json={"model": _MODEL, "instructions": "", "input": "synthetic input", "stream": True},
+        )
+        assert response.status_code == 200, response.text
+        await app_instance.state.proxy_service.drain_persistence_tasks(timeout_seconds=5)
+    finally:
+        install_overrides({})
+
+    async with SessionLocal() as session:
+        assert (await session.scalars(select(ApiKeyUsageReservation))).all() == []
+        log = (await session.scalars(select(RequestLog).where(RequestLog.api_key_id == key_id))).one()
+    # 900 uncached input at 2, 100 cached at 0, and 100 output at 8 per million tokens.
+    assert log.cost_status == "priced"
+    assert (log.cost_input_usd, log.cost_cached_input_usd, log.cost_output_usd) == pytest.approx((0.0018, 0, 0.0008))
+    assert log.cost_usd == pytest.approx(0.0026)
+
+
+@pytest.mark.parametrize(
+    ("requested", "reported", "expected_microdollars"),
+    [
+        # Explicit catalog Priority and Flex rates win over the local base triple.
+        ("priority", "priority", 900 * 8 + 100 * 8 + 100 * 20),
+        ("flex", "flex", 900 * 2 + 100 * 2 + 100 * 5),
+        # Settlement prefers the upstream-reported tier, here standard, so the override applies.
+        ("priority", "default", 900 * 2 + 100 * 0 + 100 * 8),
+    ],
+)
+async def test_route_settles_tiered_requests_with_override(
+    async_client, app_instance, subscription_cost_key, monkeypatch, requested, reported, expected_microdollars
+):
+    from app.core.usage import pricing_catalog as catalog
+
+    key_id, headers = subscription_cost_key
+    monkeypatch.setattr(
+        catalog,
+        "_prices",
+        {
+            _MODEL: ModelPrice(
+                4,
+                10,
+                1,
+                priority_input_per_1m=8,
+                priority_output_per_1m=20,
+                flex_input_per_1m=2,
+                flex_output_per_1m=5,
+            )
+        },
+    )
+
+    async def upstream(*args, **kwargs) -> AsyncIterator[str]:
+        response = {
+            "id": "resp_tier_price",
+            "object": "response",
+            "status": "completed",
+            "service_tier": reported,
+            "output": [],
+            "usage": {"input_tokens": 1000, "input_tokens_details": {"cached_tokens": 100}, "output_tokens": 100},
+        }
+        yield f"data: {json.dumps({'type': 'response.completed', 'response': response})}\n\n"
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", upstream)
+    assert (
+        _price_row(await async_client.put(f"{_PRICES}/{_MODEL}", json=_SYNTHETIC_RATES))["source"] == "local_override"
+    )
+    response = await async_client.post(
+        "/v1/responses",
+        headers=headers,
+        json={"model": _MODEL, "instructions": "", "input": "tiered", "stream": True, "service_tier": requested},
+    )
+    assert response.status_code == 200, response.text
+    await app_instance.state.proxy_service.drain_persistence_tasks(timeout_seconds=5)
+
+    async with SessionLocal() as session:
+        reservation = (
+            await session.scalars(select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id))
+        ).one()
+        assert (reservation.status, reservation.cost_microdollars) == ("finalized", expected_microdollars)
+        log = (await session.scalars(select(RequestLog).where(RequestLog.api_key_id == key_id))).one()
+        assert log.cost_status == "priced"
+        assert log.cost_usd == pytest.approx(expected_microdollars / 1_000_000)
+
+
+async def test_request_path_reads_no_prices_and_mutations_keep_folded_history(
+    async_client, app_instance, subscription_cost_key, monkeypatch
+):
+    from datetime import timedelta
+
+    from sqlalchemy import event, func
+    from sqlalchemy.engine import Engine
+
+    from app.core.usage import pricing_catalog as catalog
+    from app.core.utils.time import utcnow
+    from app.db.models import (
+        AccountUsageRollup,
+        ApiKeyUsageRollup,
+        RequestDemandQuarterRollup,
+        RequestReportHourlyRollup,
+        RequestUsageHourlyRollup,
+    )
+    from app.modules.accounts.usage_rollup import run_fold_pass
+    from app.modules.accounts.usage_time_rollup import run_hourly_fold_pass
+    from app.modules.reports.rollup import run_report_fold_pass
+
+    key_id, headers = subscription_cost_key
+    monkeypatch.setattr(catalog, "_prices", {_MODEL: ModelPrice(2, 8, 0.5)})
+
+    async def upstream(*args, **kwargs) -> AsyncIterator[str]:
+        response = {
+            "id": "resp_folded_price",
+            "object": "response",
+            "status": "completed",
+            "output": [],
+            "usage": {"input_tokens": 1000, "input_tokens_details": {"cached_tokens": 100}, "output_tokens": 100},
+        }
+        yield f"data: {json.dumps({'type': 'response.completed', 'response': response})}\n\n"
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", upstream)
+    statements: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany) -> None:
+        statements.append(statement)
+
+    event.listen(Engine, "before_cursor_execute", record)
+    try:
+        response = await async_client.post(
+            "/v1/responses",
+            headers=headers,
+            json={"model": _MODEL, "instructions": "", "input": "folded", "stream": True},
+        )
+        assert response.status_code == 200, response.text
+        await app_instance.state.proxy_service.drain_persistence_tasks(timeout_seconds=5)
+    finally:
+        event.remove(Engine, "before_cursor_execute", record)
+    assert statements, "listener must observe the request's own persistence"
+    assert not [statement for statement in statements if "model_price_overrides" in statement]
+
+    later = utcnow() + timedelta(hours=3)
+    await run_fold_pass(now=later)
+    await run_hourly_fold_pass(now=later)
+    await run_report_fold_pass(now=later)
+
+    async def snapshot() -> tuple[object, ...]:
+        async with SessionLocal() as session:
+            return (
+                await session.scalar(select(AccountUsageRollup.total_cost_usd)),
+                await session.scalar(select(ApiKeyUsageRollup.total_cost_usd)),
+                await session.scalar(select(func.sum(RequestUsageHourlyRollup.cost_usd))),
+                await session.scalar(select(func.sum(RequestUsageHourlyRollup.cost_count))),
+                await session.scalar(select(func.sum(RequestDemandQuarterRollup.cost_usd))),
+                await session.scalar(select(func.sum(RequestReportHourlyRollup.cost_usd))),
+                await session.scalar(select(ApiKeyLimit.current_value).where(ApiKeyLimit.api_key_id == key_id)),
+                tuple(
+                    (row.status, row.cost_microdollars)
+                    for row in await session.scalars(
+                        select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id)
+                    )
+                ),
+                tuple(
+                    (row.cost_status, row.cost_usd, row.cost_input_usd, row.cost_cached_input_usd, row.cost_output_usd)
+                    for row in await session.scalars(select(RequestLog).where(RequestLog.api_key_id == key_id))
+                ),
+            )
+
+    def history() -> list[tuple[object, object]]:
+        return [(row["costUsd"], row["costStatus"]) for row in requests_json]
+
+    before = await snapshot()
+    # 900 uncached input at 2, 100 cached at 0.5, and 100 output at 8 per million tokens.
+    assert before[0] == pytest.approx(0.00265) and before[6] == 2650 and before[7] == (("finalized", 2650),)
+    requests_json = (await async_client.get("/api/request-logs")).json()["requests"]
+    history_before = history()
+
+    assert (
+        _price_row(await async_client.put(f"{_PRICES}/{_MODEL}", json=_SYNTHETIC_RATES))["source"] == "local_override"
+    )
+    assert await snapshot() == before
+    monkeypatch.setattr(catalog, "_prices", {_MODEL: ModelPrice(40, 100, 10)})
+    assert _price_row(await async_client.delete(f"{_PRICES}/{_MODEL}"))["effective"]["inputPer1M"] == 40
+    assert await snapshot() == before
+    requests_json = (await async_client.get("/api/request-logs")).json()["requests"]
+    assert history() == history_before
