@@ -452,6 +452,11 @@ test.describe("Simple Dashboard", () => {
     expect(key.assignedAccountIds).toEqual([twoAccounts[0].accountId]);
 
     await page.setViewportSize({ width: 420, height: 880 });
+    await page.goto(BASE_URL);
+    await expect(page).toHaveURL(/\/dashboard$/);
+    await page.getByRole("button", { name: "Open menu" }).click();
+    await page.getByRole("link", { name: "Simple Dashboard", exact: true }).click();
+    await expect(page).toHaveURL(/\/simple-dashboard$/);
     await expect(page.getByRole("heading", { name: "Simple Dashboard" })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(420);
   });

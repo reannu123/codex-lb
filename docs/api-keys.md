@@ -36,6 +36,25 @@ Saving a fixed scope with no accounts denies new requests authenticated with tha
 again to reopen the same key. If the global API key auth setting allows an anonymous request, that
 request still follows the existing anonymous access rules.
 
+### Rolling out and rolling back explicit account scope
+
+- **Upgrade every replica before saving scopes from Simple Dashboard.** An older replica ignores the
+  scope update and keeps the stored scope. If the response omits a scope field or reports a different
+  scope, the dashboard shows a confirmation error and reloads the key list. An older replica can
+  still apply unrelated fields from the same edit.
+- **Multiple replicas need PostgreSQL.** A SQLite database serves one process. Each replica re-reads a
+  key's committed scope on every keyed admission, so a save on one replica denies the next request on
+  every other upgraded replica without waiting for cache invalidation.
+- **Rolling back keeps empty-scoped keys closed.** Older builds already route a scoped key with no
+  accounts to an empty pool, so requests still fail instead of using other accounts. The response
+  then uses the older routing error instead of `api_key_account_scope_empty`, and other replicas may
+  serve a cached scope until their key cache refreshes.
+- **After a rollback, reopen keys by assigning an account.** Saving an empty account list from an older
+  dashboard makes the key unrestricted, not closed.
+
+The owning requirements are in the
+[api-keys spec](https://github.com/reannu123/switchboard/tree/main/openspec/specs/api-keys).
+
 ## Reasoning effort policies
 
 A key can either enforce one reasoning effort or allow a selected non-empty set of client-requested efforts.

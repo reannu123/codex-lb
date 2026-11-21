@@ -50,5 +50,61 @@ fresh scope through every admission call site, including WebSocket, and move the
 against a production-like database before deciding. Cache-only checks cannot provide the immediate
 cross-replica denial.
 
-Not yet verified locally: forwarded bridge reuse across replicas, WebSocket admission across replicas,
-latency on a non-loopback database, and frontend unit coverage for the 3.x edge cases.
+The repeat on base `cf47701c` extended this check to real WebSockets. B warmed the key over
+`GET /v1/models` and accepted a native Responses WebSocket before A committed an empty scope.
+The next `response.create` on that socket returned the scope error in 6.05 ms, with no poller wait.
+A fresh WebSocket handshake on B and B's next model and raw or streaming Responses requests all
+returned 403 with the same code. A stale save returned 409, and a valid reopen restored model reads
+on B. This used synthetic credentials and a fresh loopback PostgreSQL database, which was removed
+after both processes stopped. The WebSocket was open and idle when the scope changed. A repeat also
+sent a correctly signed forwarded continuation to B's internal bridge endpoint after the commit and
+got the same 403 before bridge owner lookup. The harness generated that request with the normal
+forwarding serializer and sent it directly to the receiving app.
+
+Still unverified on two real replicas: automatic ring forwarding with live bridge-session reuse and
+completion and settlement of concurrent in-flight work. The loopback latency measurements do not cover
+a remote database or a cold key cache.
+
+## Rollout and rollback (operator notes)
+
+Operator-facing summary: `docs/api-keys.md` ("Rolling out and rolling back explicit account scope").
+
+Rollout. Upgrade every replica before operators save scopes from Simple Dashboard. Older replicas parse the
+PATCH with Pydantic's default `extra="ignore"`. Checked against `24825dca`: `accountScopeUpdate` is dropped,
+`model_fields_set` is empty, and the update is a no-op that returns 200 with the stored scope. The new build
+does not need a migration.
+
+Rollback. Keys already saved scoped-empty stay closed on older builds. The baseline fails closed for an
+enabled scope with no assignments: `test_select_account_empty_explicit_scope_fails_closed` and
+`test_deleted_assigned_accounts_do_not_fall_back_to_other_accounts` pass on `24825dca`. Older builds lose the
+`api_key_account_scope_empty` code and the per-admission committed read, so another replica may serve a
+cached scope until its key cache refreshes. An older dashboard that saves an empty assignment list makes the
+key unrestricted, so after a rollback, reopen keys by assigning accounts.
+
+Scope confirmation. The card and native editor use the same PATCH client. It compares the two explicit
+response fields to the desired mode and assignment set before a success toast. If either field is
+missing or the tuple differs, it reports a scope confirmation error and refetches the key list. For
+example, a scoped key switched to all accounts needs the server to return both `false` and `[]`.
+Compatibility defaults used when reading ordinary key responses cannot confirm that write. The older
+replica may still apply unrelated fields on a combined edit.
+
+## Verification on `cf47701c`
+
+- The branch's two existing patches survived the rebase unchanged according to `git range-diff`.
+  The merged manual warm-up has a 300-second cooldown and an account write permission guard.
+- The broad SQLite API-key, proxy, warm-up, permission, and simplicity selection passed (625 tests).
+  PostgreSQL API-key and scope-specific bridge, sticky and WebSocket coverage passed (104 tests).
+  The focused contract rerun passed 10 tests each on SQLite and PostgreSQL, including null and empty
+  legacy clears, name-only edits, invalid explicit scope, contention, and deletion. The 102 API-key
+  service and manual warm-up tests also passed.
+- The four API-key hook tests passed. The missing-mode and missing-list cases reproduced false success
+  before the fix. The hook now reports failure without a success toast, reloads the list, and retains
+  the previous scope when the server ignored the update. All nine built-dashboard smoke tests passed,
+  including a simulated old PATCH response followed by a real save and reopen on the local backend.
+- The two Simple Dashboard screenshot scenarios passed, including New York DST, mobile menu navigation,
+  and restricted reads. The existing before/after files were preserved. Backend and frontend lint and
+  type checks passed. OpenSpec 1.11.0 strict change validation, all 67 standard specs, and the five-item
+  core navigation budget passed.
+- The full frontend suite exited 0 with 1,671 tests across 183 files. An earlier selected frontend run
+  exited 1 after all assertions passed because a React Query notification reached the navigation test
+  during jsdom teardown. The isolated navigation test and the full frontend suite both exited 0 on rerun.
