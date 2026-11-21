@@ -658,3 +658,22 @@ export type TelemetrySnapshot = z.infer<typeof TelemetrySnapshotSchema>;
 export type TelemetrySnapshotEnvelope = z.infer<typeof TelemetrySnapshotEnvelopeSchema>;
 export type TelemetryConsent = z.infer<typeof TelemetryConsentSchema>;
 export type TelemetryConsentUpdateRequest = z.infer<typeof TelemetryConsentUpdateRequestSchema>;
+
+const ModelBaseRatesSchema = z.object({
+  inputPer1M: z.number().nonnegative(),
+  cachedInputPer1M: z.number().nonnegative(),
+  outputPer1M: z.number().nonnegative(),
+});
+
+export const ModelPriceSchema = z.object({
+  modelId: z.string(),
+  catalogModelId: z.string().nullable(),
+  source: z.enum(["local_override", "live_catalog", "last_good_cache", "bundled_snapshot", "built_in", "missing"]),
+  effective: ModelBaseRatesSchema.nullable(),
+  inherited: ModelBaseRatesSchema.nullable(),
+  cachedInputInheritsInput: z.boolean(),
+  hasCatalogTiers: z.boolean(),
+});
+
+export const ModelPricesSchema = z.object({ models: z.array(ModelPriceSchema) });
+export type ModelPrice = z.infer<typeof ModelPriceSchema>;

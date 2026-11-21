@@ -243,6 +243,7 @@ export const RequestLogSchema = z.object({
   cachedInputTokens: z.number().nullable(),
   reasoningEffort: z.string().nullable(),
   costUsd: z.number().nullable(),
+  costStatus: z.enum(["priced", "missing_price", "usage_unavailable"]).nullable().optional(),
   costBreakdown: RequestLogCostBreakdownSchema.nullable().optional().default(null),
   latencyMs: z.number().nullable(),
   latencyFirstTokenMs: z.number().nullable().optional().default(null),

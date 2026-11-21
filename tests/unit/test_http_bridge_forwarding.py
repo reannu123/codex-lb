@@ -13,6 +13,7 @@ from aiohttp.client_reqrep import ConnectionKey
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import get_settings
 from app.core.openai.requests import ResponsesRequest
+from app.core.usage.pricing import ModelPrice
 from app.modules.api_keys.service import ApiKeyUsageReservationData
 from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_AFFINITY_KEY_HEADER,
@@ -25,6 +26,8 @@ from app.modules.proxy.http_bridge_forwarding import (
     HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER,
     HTTP_BRIDGE_ORIGIN_INSTANCE_HEADER,
     HTTP_BRIDGE_ORIGINAL_UNANCHORED_HEADER,
+    HTTP_BRIDGE_PRICE_HEADER,
+    HTTP_BRIDGE_PRICE_SIGNATURE_HEADER,
     HTTP_BRIDGE_RESERVATION_ID_HEADER,
     HTTP_BRIDGE_RESERVATION_KEY_ID_HEADER,
     HTTP_BRIDGE_RESERVATION_MODEL_HEADER,
@@ -1694,3 +1697,28 @@ async def test_iter_sse_event_blocks_receive_timeout_is_scheduler_owned() -> Non
     await scheduler.cancel_owned_tasks()
     assert scheduler.owned_tasks == frozenset()
     assert scheduler.pending_timers == 0
+
+
+@pytest.mark.parametrize("price", [None, ModelPrice(2, 8, 0, priority_multiplier=2)])
+def test_authenticated_forward_round_trips_origin_price(price: ModelPrice | None) -> None:
+    payload = _payload()
+    context = HTTPBridgeForwardContext(
+        origin_instance="origin",
+        target_instance="target",
+        codex_session_affinity=False,
+        downstream_turn_state=None,
+        price_quote=(payload.model, price),
+    )
+    headers = build_owner_forward_headers(headers={}, payload=payload, context=context)
+    forwarded, error = parse_forwarded_request(headers, payload=payload, current_instance="target")
+    assert error is None and forwarded is not None
+    assert forwarded.context.price_quote == (payload.model, price)
+
+    headers.pop(HTTP_BRIDGE_PRICE_SIGNATURE_HEADER)
+    forwarded, error = parse_forwarded_request(headers, payload=payload, current_instance="target")
+    assert forwarded is None and error is not None and error.status_code == 400
+
+    headers.pop(HTTP_BRIDGE_PRICE_HEADER)
+    forwarded, error = parse_forwarded_request(headers, payload=payload, current_instance="target")
+    assert error is None and forwarded is not None
+    assert forwarded.context.price_quote is None

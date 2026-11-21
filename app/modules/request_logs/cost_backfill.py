@@ -52,6 +52,7 @@ async def backfill_missing_costs(session: AsyncSession, *, after_id: int = 0, li
                     .where(
                         RequestLog.id > after_id,
                         RequestLog.cost_usd.is_(None),
+                        RequestLog.cost_status.is_(None),
                         RequestLog.model_source_id.is_(None),
                         or_(RequestLog.model_source_kind.is_(None), RequestLog.model_source_kind == "subscription"),
                         RequestLog.input_tokens.is_not(None),

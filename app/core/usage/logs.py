@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from app.core.usage.price_overrides import get_subscription_pricing
 from app.core.usage.pricing import (
     UsageCostBreakdown,
     UsageTokens,
@@ -99,6 +100,28 @@ def calculated_cost_from_log(log: RequestLogLike, *, precision: int | None = Non
     if precision is None:
         return cost
     return round(cost, precision)
+
+
+def subscription_cost_from_log(log: RequestLogLike) -> tuple[str, UsageCostBreakdown | None]:
+    input_tokens = log.input_tokens
+    output_tokens = output_tokens_from_log(log)
+    cached_tokens = cached_input_tokens_from_log(log)
+    has_usage = input_tokens is not None and output_tokens is not None
+    resolved = get_subscription_pricing(log.model or "")
+    if resolved is None:
+        return ("missing_price" if has_usage else "usage_unavailable"), None
+    breakdown = calculate_cost_breakdown_from_usage(
+        UsageTokens(input_tokens or 0, output_tokens or 0, cached_tokens or 0),
+        resolved[1],
+        service_tier=log.service_tier,
+    )
+    assert breakdown is not None
+    return ("priced" if has_usage else "usage_unavailable"), UsageCostBreakdown(
+        input_usd=breakdown.input_usd if input_tokens is not None and cached_tokens is not None else None,
+        cached_input_usd=breakdown.cached_input_usd if input_tokens is not None and cached_tokens is not None else None,
+        output_usd=breakdown.output_usd if output_tokens is not None else None,
+        total_usd=breakdown.total_usd if has_usage else None,
+    )
 
 
 def cost_from_log(log: RequestLogLike, *, precision: int | None = None) -> float | None:

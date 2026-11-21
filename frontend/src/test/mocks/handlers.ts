@@ -1,6 +1,7 @@
 import { HttpResponse, http } from "msw";
 import { z } from "zod";
 
+import type { ModelPrice } from "@/features/settings/schemas";
 import type { InviteDescription } from "@/features/auth/schemas";
 import type { DashboardRole, DashboardUser } from "@/features/access/api";
 import type { AuditEntry, AuthProvider, RoleMapping, ScimToken } from "@/features/organisation/api";
@@ -401,6 +402,7 @@ type MockState = {
   quotaPlannerDecisions: QuotaPlannerDecision[];
   upstreamProxyAdmin: UpstreamProxyAdmin;
   modelContextWindowOverrides: ModelContextWindowOverrides;
+  modelPrices: ModelPrice[];
   quotaPlannerForecast: QuotaPlannerForecast;
   apiKeys: ApiKey[];
   automations: Array<{
@@ -508,6 +510,10 @@ function createInitialState(): MockState {
     quotaPlannerDecisions: [createQuotaPlannerDecision()],
     upstreamProxyAdmin: createUpstreamProxyAdmin(),
     modelContextWindowOverrides: createModelContextWindowOverrides(),
+    modelPrices: [{
+      modelId: "gpt-6.2-sol", catalogModelId: null, source: "missing", effective: null,
+      inherited: null, cachedInputInheritsInput: false, hasCatalogTiers: false,
+    }],
     quotaPlannerForecast: createQuotaPlannerForecast(),
     apiKeys: createDefaultApiKeys(),
     automations: [],
@@ -1741,6 +1747,30 @@ export const handlers = [
         reason: "admin_canceled",
       }),
     );
+  }),
+
+  http.get("/api/settings/model-prices", () => HttpResponse.json({ models: state.modelPrices })),
+  http.put("/api/settings/model-prices/:modelId*", async ({ params, request }) => {
+    const model = state.modelPrices.find((item) => item.modelId === decodeURIComponent(String(params.modelId)));
+    const rates = await parseJsonBody(request, z.object({
+      inputPer1M: z.string(), cachedInputPer1M: z.string(), outputPer1M: z.string(),
+    }));
+    if (!model || !rates) return HttpResponse.json({}, { status: 400 });
+    model.source = "local_override";
+    model.effective = {
+      inputPer1M: Number(rates.inputPer1M),
+      cachedInputPer1M: Number(rates.cachedInputPer1M),
+      outputPer1M: Number(rates.outputPer1M),
+    };
+    return HttpResponse.json({ models: state.modelPrices });
+  }),
+  http.delete("/api/settings/model-prices/:modelId*", ({ params }) => {
+    const model = state.modelPrices.find((item) => item.modelId === decodeURIComponent(String(params.modelId)));
+    if (model) {
+      model.source = "missing";
+      model.effective = null;
+    }
+    return HttpResponse.json({ models: state.modelPrices });
   }),
 
   http.get("/api/settings/model-context-window-overrides", () => {

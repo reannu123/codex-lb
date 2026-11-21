@@ -227,6 +227,10 @@ function RequestLogTableHead({
   );
 }
 
+function formatRequestCost(value: number | null): string {
+  return value != null && value > 0 && value < 0.01 ? "< $0.01" : formatCurrency(value);
+}
+
 function formatRequestCostSummary(request: RequestLog | null, t: ReturnType<typeof useTranslation>["t"]): string | null {
   if (!request || request.status !== "ok") {
     return null;
@@ -243,7 +247,7 @@ function formatRequestCostSummary(request: RequestLog | null, t: ReturnType<type
       t("dashboard.requestDetails.costSegment", {
         count: formatCompactNumber(nonCachedInputTokens),
         label: t("common.units.input"),
-        cost: formatCurrency(request.costBreakdown.inputUsd),
+        cost: formatRequestCost(request.costBreakdown.inputUsd),
       }),
     );
   }
@@ -253,7 +257,7 @@ function formatRequestCostSummary(request: RequestLog | null, t: ReturnType<type
       t("dashboard.requestDetails.costSegment", {
         count: formatCompactNumber(request.cachedInputTokens),
         label: t("common.units.cached"),
-        cost: formatCurrency(request.costBreakdown.cachedInputUsd),
+        cost: formatRequestCost(request.costBreakdown.cachedInputUsd),
       }),
     );
   }
@@ -263,7 +267,7 @@ function formatRequestCostSummary(request: RequestLog | null, t: ReturnType<type
       t("dashboard.requestDetails.costSegment", {
         count: formatCompactNumber(request.outputTokens),
         label: t("common.units.output"),
-        cost: formatCurrency(request.costBreakdown.outputUsd),
+        cost: formatRequestCost(request.costBreakdown.outputUsd),
       }),
     );
   }
@@ -276,7 +280,7 @@ function formatRequestCostSummary(request: RequestLog | null, t: ReturnType<type
     return segments.join(" + ");
   }
 
-  return `${formatCurrency(totalUsd)} = ${segments.join(" + ")}`;
+  return `${formatRequestCost(totalUsd)} = ${segments.join(" + ")}`;
 }
 
 function formatGenerationSpeed(request: RequestLog): string | null {
@@ -522,7 +526,13 @@ export function RecentRequestsTable({
                     </div>
                   </TableCell> : null}
                   {isColumnVisible("cost") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
-                    {formatCurrency(request.costUsd)}
+                    {request.costUsd !== null
+                      ? formatRequestCost(request.costUsd)
+                      : t(request.costStatus === "missing_price"
+                        ? "dashboard.requestDetails.missingPrice"
+                        : request.costStatus === "usage_unavailable"
+                          ? "dashboard.requestDetails.usageUnavailable"
+                          : "dashboard.requestDetails.costUnavailable")}
                   </TableCell> : null}
                   {isColumnVisible("details") ? <TableCell className="pr-4 align-top whitespace-normal">
                     {hasError ? (

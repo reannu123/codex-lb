@@ -132,6 +132,27 @@ describe("RecentRequestsTable", () => {
     expect(screen.getByRole("button", { name: "View Details" })).toBeInTheDocument();
   });
 
+  it("distinguishes missing, unavailable, zero and tiny positive costs", () => {
+    const rows = [
+      { requestId: "req-missing", costUsd: null, costStatus: "missing_price" as const, apiKeyName: "Missing" },
+      { requestId: "req-unavailable", costUsd: null, costStatus: "usage_unavailable" as const, apiKeyName: "Unavailable" },
+      { requestId: "req-legacy", costUsd: null, costStatus: null, apiKeyName: "Legacy" },
+      { requestId: "req-zero", costUsd: 0, costStatus: "priced" as const, apiKeyName: "Zero" },
+      { requestId: "req-tiny", costUsd: 0.0004, costStatus: "priced" as const, apiKeyName: "Tiny" },
+    ].map((row) => ({ ...LAYOUT_REQUEST, ...row }));
+    render(<RecentRequestsTable {...PAGINATION_PROPS} accounts={[]} requests={rows} />);
+
+    const costCell = (name: string) => {
+      const cells = within(screen.getByText(name).closest("tr")!).getAllByRole("cell");
+      return cells[ALL_REQUEST_LOG_COLUMNS.indexOf("cost")];
+    };
+    expect(costCell("Missing")).toHaveTextContent("Missing price");
+    expect(costCell("Unavailable")).toHaveTextContent("Usage unavailable");
+    expect(costCell("Legacy")).toHaveTextContent("Cost unavailable");
+    expect(costCell("Zero")).toHaveTextContent("$0.00");
+    expect(costCell("Tiny")).toHaveTextContent("< $0.01");
+  });
+
   it("renders only selected headers and matching row cells", () => {
     render(
       <RecentRequestsTable
@@ -905,9 +926,9 @@ describe("RecentRequestsTable", () => {
 
     expect(within(dialog).getByText("Cost")).toBeInTheDocument();
     expect(costSection).toHaveTextContent("$0.01 =");
-    expect(costSection).toHaveTextContent("800 Input ($0.00)");
-    expect(costSection).toHaveTextContent("200 Cached ($0.00)");
-    expect(costSection).toHaveTextContent("400 Output ($0.00)");
+    expect(costSection).toHaveTextContent("800 Input (< $0.01)");
+    expect(costSection).toHaveTextContent("200 Cached (< $0.01)");
+    expect(costSection).toHaveTextContent("400 Output (< $0.01)");
   });
 
   it("shows the full user agent in request details when present", () => {
@@ -1134,8 +1155,8 @@ describe("RecentRequestsTable", () => {
 
     expect(within(dialog).getByText("Cost")).toBeInTheDocument();
     expect(costSection).toHaveTextContent("$0.01 =");
-    expect(costSection).toHaveTextContent("500 Input ($0.01)");
-    expect(costSection).toHaveTextContent("200 Cached ($0.00)");
+    expect(costSection).toHaveTextContent("500 Input (< $0.01)");
+    expect(costSection).toHaveTextContent("200 Cached (< $0.01)");
     expect(costSection).not.toHaveTextContent("Output");
   });
 
@@ -1191,8 +1212,8 @@ describe("RecentRequestsTable", () => {
 
     expect(within(dialog).getByText("Cost")).toBeInTheDocument();
     expect(costSection).not.toHaveTextContent("=");
-    expect(costSection).toHaveTextContent("800 Input ($0.01)");
-    expect(costSection).toHaveTextContent("200 Cached ($0.00)");
+    expect(costSection).toHaveTextContent("800 Input (< $0.01)");
+    expect(costSection).toHaveTextContent("200 Cached (< $0.01)");
     expect(costSection).not.toHaveTextContent("Output");
   });
 

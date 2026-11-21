@@ -7,6 +7,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.core.config.dashboard_overrides import bind_dashboard_overrides, reset_dashboard_overrides
 from app.core.config.settings_cache import get_settings_cache
+from app.core.usage.price_overrides import bind_pricing_view, reset_pricing_view
 
 logger = logging.getLogger(__name__)
 
@@ -38,14 +39,15 @@ class DashboardOverridesMiddleware:
         except Exception:  # noqa: BLE001 - never fail a request over an unreadable snapshot
             row = cache.cached_row()
             self._log_snapshot_failure(stale_row_available=row is not None)
-        if row is None:
-            await self.app(scope, receive, send)
-            return
-        token = bind_dashboard_overrides(row)
+        token = bind_dashboard_overrides(row) if row is not None else None
+        price_token = bind_pricing_view() if scope["type"] == "http" else None
         try:
             await self.app(scope, receive, send)
         finally:
-            reset_dashboard_overrides(token)
+            if price_token is not None:
+                reset_pricing_view(price_token)
+            if token is not None:
+                reset_dashboard_overrides(token)
 
     def _log_snapshot_failure(self, *, stale_row_available: bool) -> None:
         now = time.monotonic()
