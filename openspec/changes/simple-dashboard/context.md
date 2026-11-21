@@ -108,3 +108,6 @@ replica may still apply unrelated fields on a combined edit.
 - The full frontend suite exited 0 with 1,671 tests across 183 files. An earlier selected frontend run
   exited 1 after all assertions passed because a React Query notification reached the navigation test
   during jsdom teardown. The isolated navigation test and the full frontend suite both exited 0 on rerun.
+
+The draft review uses the local evidence above while hosted Actions capacity is unavailable. The
+before and after images are available in the owning Orchestrator session's Artifacts tab.
