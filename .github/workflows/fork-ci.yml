@@ -1,0 +1,308 @@
+name: Fork CI
+
+# Fork-owned CI for reannu123/codex-lb (see .github/FORK_POLICY.md). Upstream
+# workflows are retired on this fork by repository guards, so imports from
+# Soju06/codex-lb stay conflict-light. "Fork CI required" is the single check
+# branch protection requires; every group below feeds it.
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-24.04
+    outputs:
+      backend: ${{ steps.areas.outputs.backend }}
+      frontend: ${{ steps.areas.outputs.frontend }}
+      rust: ${{ steps.areas.outputs.rust }}
+      image: ${{ steps.areas.outputs.image }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select groups
+        id: areas
+        run: python3 .github/fork/changed_areas.py
+
+  policy:
+    name: Policy (workflow retirement, OpenSpec)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          prune-cache: true
+      - name: Upstream workflows are retired or explicitly kept
+        run: uv run --frozen python .github/fork/check_workflow_retirement.py
+      - name: Validate canonical OpenSpec capabilities
+        run: npx --yes @fission-ai/openspec@1.11.0 validate --specs
+      - name: Strictly validate changed OpenSpec folders
+        if: github.event_name != 'workflow_dispatch'
+        run: python3 .github/scripts/validate_changed_openspec.py
+      # A manual run has no change set, and most inherited upstream change
+      # folders do not pass strict validation, so dispatch validates the
+      # canonical specs (above) and records that the per-change step is N/A.
+      - name: Changed OpenSpec folders (manual run)
+        if: github.event_name == 'workflow_dispatch'
+        run: echo "::notice::workflow_dispatch has no change set; canonical specs validated, per-change strict validation applies to pull requests and pushes."
+
+  python-quality:
+    name: Lint (ruff, architecture) and type check (ty)
+    runs-on: ubuntu-24.04
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          prune-cache: true
+      - name: Lint and architecture checks
+        run: make lint
+      - name: Type check
+        run: make typecheck
+
+  backend-tests:
+    name: Backend tests (${{ matrix.suite }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [unit, focused-integration]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: "1.3.14"
+      - name: Cache Bun dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.bun/install/cache
+            frontend/node_modules
+          key: bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
+          restore-keys: |
+            bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          prune-cache: true
+      - name: Unit, simulation and request-log tests
+        if: matrix.suite == 'unit'
+        run: make test-unit
+      - name: Focused integration tests and SQLite migration check
+        if: matrix.suite == 'focused-integration'
+        env:
+          PYTHONFAULTHANDLER: "1"
+        run: |
+          make frontend-build
+          uv sync --dev --frozen
+          mapfile -t targets < <(grep -vE '^\s*(#|$)' .github/fork/focused-integration-tests.txt)
+          missing=0
+          for target in "${targets[@]}"; do
+            [ -f "${target}" ] || { echo "::error::focused test ${target} is listed but missing"; missing=1; }
+          done
+          # Explicit exit: under `bash -e`, a failing non-final command of an
+          # `&&` list does not stop the step.
+          if [ "${missing}" -ne 0 ] || [ "${#targets[@]}" -eq 0 ]; then
+            exit 1
+          fi
+          uv run pytest -q -ra -o faulthandler_timeout=300 --timeout=180 --timeout-method=thread "${targets[@]}"
+          make migration-check
+
+  frontend:
+    name: Frontend (tsc, eslint, vitest, build)
+    runs-on: ubuntu-24.04
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: "1.3.14"
+      - name: Cache Bun dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.bun/install/cache
+            frontend/node_modules
+          key: bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/bun.lock') }}
+          restore-keys: |
+            bun-1.3.14-${{ runner.os }}-${{ runner.arch }}-
+      - name: Type check
+        run: make frontend-typecheck
+      - name: Lint
+        run: make frontend-lint
+      - name: Unit tests
+        run: make frontend-test-fast
+      - name: Build
+        run: make frontend-build
+
+  rust:
+    name: Rust workspace
+    runs-on: ubuntu-24.04
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal --component clippy,rustfmt
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          prune-cache: true
+      - name: Cache Cargo downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-
+      - name: Check formatting, lints, tests, and release build
+        run: make rust-check
+      - name: Run native routed and SSE wire probes
+        env:
+          CODEX_LB_NATIVE_EGRESS_TEST_BINARY: ${{ github.workspace }}/target/debug/codex-lb-native-egress
+        run: |
+          uv sync --dev --frozen
+          cargo build --locked -p codex-lb-egress-worker --bin codex-lb-native-egress
+          uv run pytest -q -ra tests/integration/test_native_routed_egress.py tests/integration/test_native_sse_egress.py tests/integration/test_native_websocket_events.py tests/integration/test_native_usage_egress.py
+      - name: Audit Rust bans, licenses and sources (blocking)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
+        with:
+          rust-version: "1.96.0"
+          command: check
+          arguments: --all-features
+          command-arguments: bans licenses sources
+      # Reported, not blocking (fork policy): main's Cargo.lock carries RustSEC
+      # advisories inherited from upstream (RUSTSEC-2026-0382, -0386, -0391,
+      # -0398, -0403, -0410, -0441). They are fixed upstream, not here, and the
+      # published container is still gated by the blocking Trivy scan.
+      - name: Report Rust advisories (non-blocking)
+        id: advisories
+        continue-on-error: true
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
+        with:
+          rust-version: "1.96.0"
+          command: check
+          arguments: --all-features
+          command-arguments: advisories
+      - name: Summarize Rust advisories
+        if: always()
+        env:
+          OUTCOME: ${{ steps.advisories.outcome }}
+        run: |
+          if [ "${OUTCOME}" = "failure" ]; then
+            echo "::warning title=Rust advisories (reported)::cargo-deny advisories failed; see the step log. Inherited from upstream Cargo.lock; non-blocking under fork policy."
+            echo "### Rust advisories: reported (non-blocking)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Rust advisories: clean" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  image:
+    name: Container image (build, boot, readiness, Trivy)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    needs: changes
+    if: needs.changes.outputs.image == 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+      - name: Build image (linux/amd64)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: codex-lb:fork-ci
+      - name: Boot the container and wait for readiness
+        run: .github/fork/boot_and_probe.sh codex-lb:fork-ci
+      - name: Trivy CRITICAL/HIGH gate (blocking)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: codex-lb:fork-ci
+          format: table
+          exit-code: 1
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+  required:
+    name: Fork CI required
+    runs-on: ubuntu-24.04
+    if: always()
+    needs: [changes, policy, python-quality, backend-tests, frontend, rust, image]
+    steps:
+      - name: Every selected group passed
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          failed = {name: d["result"] for name, d in needs.items() if d["result"] not in {"success", "skipped"}}
+          for name, d in needs.items():
+              print(f"{d['result']:>10}  {name}")
+          if needs["changes"]["result"] != "success" or needs["policy"]["result"] != "success":
+              failed.setdefault("changes/policy", "must succeed")
+          if failed:
+              for name, result in failed.items():
+                  print(f"::error::{name}: {result}")
+              sys.exit(1)
+          print("Fork CI passed")
+          PY

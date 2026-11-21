@@ -28,6 +28,7 @@ jobs:
   # Pushes to main and merge queue events still run the full suite.
   changes:
     name: Detect changes
+    if: github.repository == 'Soju06/codex-lb'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -64,6 +65,7 @@ jobs:
 
   contributors:
     name: Contributors attribution
+    if: github.repository == 'Soju06/codex-lb'
     runs-on: ubuntu-24.04
 
     steps:
@@ -487,7 +489,7 @@ jobs:
   test-integration-core-required:
     name: Tests (pytest, integration-core)
     runs-on: ubuntu-24.04
-    if: always()
+    if: github.repository == 'Soju06/codex-lb' && (always())
     needs:
       - test-integration-core
 
@@ -879,7 +881,7 @@ jobs:
   ci-required:
     name: CI Required
     runs-on: ubuntu-24.04
-    if: always()
+    if: github.repository == 'Soju06/codex-lb' && (always())
     needs:
       - changes
       - contributors

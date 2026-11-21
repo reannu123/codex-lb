@@ -22,6 +22,7 @@ env:
 jobs:
   release-metadata:
     name: Resolve release metadata
+    if: github.repository == 'Soju06/codex-lb'
     runs-on: ubuntu-24.04
 
     outputs:
@@ -392,9 +393,11 @@ jobs:
     runs-on: ubuntu-24.04
     if: >-
       ${{
+        github.repository == 'Soju06/codex-lb' && (
         always() &&
         github.event_name == 'release' &&
         (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
+        )
       }}
 
     permissions:
