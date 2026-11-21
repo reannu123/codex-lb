@@ -41,6 +41,7 @@ export type AccountDetailProps = {
   onResetCredit: (accountId: string) => void;
   showResetCreditExpiryBadge?: boolean;
   onLimitWarmupChange: (accountId: string, enabled: boolean) => void;
+  onManualWarmup?: (accountId: string) => void;
   onRoutingPolicyChange: (
     accountId: string,
     routingPolicy: AccountRoutingPolicy,
@@ -70,6 +71,7 @@ export function AccountDetail({
   onResetCredit,
   showResetCreditExpiryBadge = true,
   onLimitWarmupChange,
+  onManualWarmup,
   onRoutingPolicyChange,
   onSecurityWorkAuthorizedChange,
   upstreamProxyAdmin = null,
@@ -185,6 +187,7 @@ export function AccountDetail({
         onResetCredit={onResetCredit}
         showResetCreditExpiryBadge={showResetCreditExpiryBadge}
         onLimitWarmupChange={onLimitWarmupChange}
+        onManualWarmup={onManualWarmup}
         onRoutingPolicyChange={onRoutingPolicyChange}
         onSecurityWorkAuthorizedChange={onSecurityWorkAuthorizedChange}
       />
