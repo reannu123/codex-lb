@@ -107,7 +107,7 @@ export const ApiKeyCreateResponseSchema = ApiKeySchema.extend({
   key: z.string(),
 });
 
-const ApiKeyAccountScopeSchema = z.object({
+export const ApiKeyAccountScopeSchema = z.object({
   accountAssignmentScopeEnabled: z.boolean(),
   assignedAccountIds: z.array(z.string()),
 });

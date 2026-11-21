@@ -311,7 +311,8 @@ async def test_create_api_key_preserves_empty_usage_sections(async_client):
 
 
 @pytest.mark.asyncio
-async def test_api_key_update_persists_assigned_account_ids(async_client):
+@pytest.mark.parametrize("legacy_clear", [[], None], ids=["empty", "null"])
+async def test_api_key_update_persists_assigned_account_ids(async_client, legacy_clear):
     first_account_id = await _import_account(async_client, "acc-assigned-a", "assigned-a@example.com")
     second_account_id = await _import_account(async_client, "acc-assigned-b", "assigned-b@example.com")
 
@@ -337,13 +338,53 @@ async def test_api_key_update_persists_assigned_account_ids(async_client):
     assert listed.json()[0]["accountAssignmentScopeEnabled"] is True
     assert listed.json()[0]["assignedAccountIds"] == [first_account_id, second_account_id]
 
+    renamed = await async_client.patch(f"/api/api-keys/{key_id}", json={"name": "renamed-key"})
+    assert renamed.status_code == 200
+    assert renamed.json()["accountAssignmentScopeEnabled"] is True
+    assert renamed.json()["assignedAccountIds"] == [first_account_id, second_account_id]
+
     cleared = await async_client.patch(
         f"/api/api-keys/{key_id}",
-        json={"assignedAccountIds": []},
+        json={"assignedAccountIds": legacy_clear},
     )
     assert cleared.status_code == 200
     assert cleared.json()["accountAssignmentScopeEnabled"] is False
     assert cleared.json()["assignedAccountIds"] == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_explicit_scope_update_preserves_key(async_client):
+    account_id = await _import_account(async_client, "acc-scope-validation", "scope-validation@example.com")
+    created = await async_client.post("/api/api-keys/", json={"name": "original", "assignedAccountIds": [account_id]})
+    assert created.status_code == 200
+    key_path = f"/api/api-keys/{created.json()['id']}"
+    expected = {"accountAssignmentScopeEnabled": True, "assignedAccountIds": [account_id]}
+    unrestricted = {"accountAssignmentScopeEnabled": False, "assignedAccountIds": []}
+
+    conflicting = await async_client.patch(
+        key_path,
+        json={"name": "mixed", "accountScopeUpdate": {**unrestricted, "expected": expected}, "assignedAccountIds": []},
+    )
+    contradictory = await async_client.patch(
+        key_path,
+        json={
+            "name": "contradictory",
+            "accountScopeUpdate": {**unrestricted, "assignedAccountIds": [account_id], "expected": expected},
+        },
+    )
+    incomplete = await async_client.patch(key_path, json={"name": "incomplete", "accountScopeUpdate": unrestricted})
+    for response in (conflicting, contradictory):
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "invalid_api_key_payload"
+    assert incomplete.status_code == 422
+    assert incomplete.json()["error"]["code"] == "validation_error"
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    saved = listed.json()[0]
+    assert saved["name"] == "original"
+    assert saved["accountAssignmentScopeEnabled"] is True
+    assert saved["assignedAccountIds"] == [account_id]
 
 
 @pytest.mark.asyncio

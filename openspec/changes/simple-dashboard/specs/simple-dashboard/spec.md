@@ -83,6 +83,11 @@ Saving SHALL persist scope atomically, show pending and committed state distinct
 - **THEN** the card shows the conflict and the current committed scope
 - **AND** nothing is reported as saved until the operator reviews and saves again
 
+#### Scenario: A successful HTTP response does not confirm the requested scope
+- **WHEN** the card or native editor submits a scope change and the successful HTTP response omits either scope field or returns a different scope
+- **THEN** the UI shows an account-scope confirmation error and reloads the committed key state
+- **AND** the UI does not report the change as saved
+
 ### Requirement: Existing routing strategy and request logs are available
 
 The page SHALL allow operators with existing settings write access to change the global routing strategy using its existing choices, validation and conflict handling. Changes SHALL appear on other settings surfaces and preserve unrelated settings. The page SHALL present existing Request Logs with the same data, filters, pagination and access rules as Dashboard.

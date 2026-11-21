@@ -608,6 +608,11 @@ test("Simple Dashboard saves and reopens a key through the real backend", async 
     data: { name: "Simple scope smoke", assignedAccountIds: [accountId] },
   });
   expect(created.ok()).toBe(true);
+  const { id: keyId } = await created.json();
+  const keyList = await page.request.get("/api/api-keys/");
+  expect(keyList.ok()).toBe(true);
+  const savedKey = (await keyList.json()).find((key: { id: string }) => key.id === keyId);
+  expect(savedKey).toBeDefined();
 
   await page.goto("/");
   await expect(page).toHaveURL(/\/dashboard$/);
@@ -619,7 +624,19 @@ test("Simple Dashboard saves and reopens a key through the real backend", async 
   const toggle = card.getByRole("switch", { name: email });
   await expect(toggle).toBeChecked();
   await toggle.click();
-  await card.getByRole("button", { name: "Save account scope" }).click();
+  const save = card.getByRole("button", { name: "Save account scope" });
+  const patchPath = `**/api/api-keys/${keyId}`;
+  await page.route(patchPath, (route) => route.fulfill({ json: savedKey }), { times: 1 });
+  const refetch = page.waitForResponse((response) =>
+    response.request().method() === "GET" && new URL(response.url()).pathname === "/api/api-keys/",
+  );
+  await save.click();
+  await expect(card.getByText("The server did not confirm the requested account scope.")).toBeVisible();
+  expect((await refetch).ok()).toBe(true);
+  await expect(page.getByText("API key updated", { exact: true })).toBeHidden();
+  await expect(card.getByText("No accounts assigned. New requests are denied.")).toBeHidden();
+
+  await save.click();
   await expect(card.getByText("No accounts assigned. New requests are denied.")).toBeVisible();
   await page.reload();
   await expect(toggle).not.toBeChecked();
