@@ -1,6 +1,6 @@
 name: Fork CI
 
-# Fork-owned CI for reannu123/codex-lb (see .github/FORK_POLICY.md). Upstream
+# Fork-owned CI for reannu123/switchboard (see .github/FORK_POLICY.md). Upstream
 # workflows are retired on this fork by repository guards, so imports from
 # Soju06/codex-lb stay conflict-light. "Fork CI required" is the single check
 # branch protection requires; every group below feeds it.

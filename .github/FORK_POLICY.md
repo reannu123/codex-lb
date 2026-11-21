@@ -1,4 +1,4 @@
-# Fork policy: reannu123/codex-lb
+# Fork policy: reannu123/switchboard
 
 This fork tracks [Soju06/codex-lb](https://github.com/Soju06/codex-lb). Where this file and
 [CONTRIBUTING.md](CONTRIBUTING.md) disagree, this file governs work that lands on the
@@ -42,7 +42,8 @@ orchestrator coordination. Admin bypass is never used to land a change.
 
 ## Image publishing
 
-[`fork-image.yml`](workflows/fork-image.yml) publishes `ghcr.io/reannu123/codex-lb`. It runs
+[`fork-image.yml`](workflows/fork-image.yml) publishes `ghcr.io/reannu123/codex-lb` (the package name is fixed and is not derived
+from the repository name; this repository was renamed from `reannu123/codex-lb`). It runs
 only after `Fork CI` succeeds for a push to `main`, or by manual dispatch, which itself
 requires a successful Fork CI push run for the commit at the tip of `main`. It builds
 that exact commit, boots it, requires `/health/ready`, and applies the **blocking Trivy
