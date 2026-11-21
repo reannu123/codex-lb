@@ -137,7 +137,11 @@ jobs:
           for target in "${targets[@]}"; do
             [ -f "${target}" ] || { echo "::error::focused test ${target} is listed but missing"; missing=1; }
           done
-          [ "${missing}" -eq 0 ] && [ "${#targets[@]}" -gt 0 ]
+          # Explicit exit: under `bash -e`, a failing non-final command of an
+          # `&&` list does not stop the step.
+          if [ "${missing}" -ne 0 ] || [ "${#targets[@]}" -eq 0 ]; then
+            exit 1
+          fi
           uv run pytest -q -ra -o faulthandler_timeout=300 --timeout=180 --timeout-method=thread "${targets[@]}"
           make migration-check
 
