@@ -61,6 +61,8 @@ Prompting cue (use when writing docs):
 
 ## Contributing & Merge Gates
 
+> **Fork:** on `reannu123/codex-lb`, [`.github/FORK_POLICY.md`](.github/FORK_POLICY.md) defines the merge gates for fork `main` (`Fork CI required`, CLEAN, no open threads, OpenSpec, orchestrator coordination) and takes precedence over the upstream gates below.
+
 When authoring or merging a PR (as a human contributor, a collaborator,
 or an AI assistant acting on behalf of either), the binding workflow is
 in [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md). The sections

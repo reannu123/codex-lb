@@ -1,0 +1,24 @@
+# Focused integration tests run on every backend change (fork policy).
+# Routing / load balancer / stickiness
+tests/integration/test_load_balancer_integration.py
+tests/integration/test_load_balancer_multi_replica.py
+tests/integration/test_proxy_sticky_sessions.py
+tests/integration/test_model_source_routing.py
+# API keys and dashboard permission scope
+tests/integration/test_api_keys_api.py
+tests/integration/test_api_key_secret_responses.py
+tests/integration/test_api_keys_trends_api.py
+tests/integration/test_dashboard_route_permission_matrix.py
+# Warm-up and usage-refresh scheduling
+tests/integration/test_atomic_quota_warmup_claims.py
+tests/integration/test_proxy_warmup.py
+tests/integration/test_quota_warmup_cancellation.py
+tests/integration/test_warmup_accounting_exclusions.py
+tests/integration/test_usage_refresh_scheduler_scope.py
+# SQLite migrations
+tests/integration/test_migrations.py
+tests/integration/test_migration_serialization.py
+tests/integration/test_migration_merge_overflow_transport.py
+tests/integration/test_affinity_identity_migration.py
+tests/integration/test_affinity_invite_migration.py
+tests/integration/test_affinity_observation_migration.py
