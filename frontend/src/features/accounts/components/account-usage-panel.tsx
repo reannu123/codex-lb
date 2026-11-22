@@ -12,12 +12,13 @@ import type {
 } from "@/features/accounts/schemas";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { useSmoothPercent } from "@/hooks/use-smooth-percent";
-import { quotaBarColor, quotaBarTrack } from "@/utils/account-status";
+import { normalizeStatus, quotaBarColor, quotaBarTrack } from "@/utils/account-status";
 import {
   formatCompactNumber,
   formatCurrency,
   formatDateTimeInline,
   formatPercentNullable,
+  formatQuotaObservation,
   formatQuotaResetLabel,
   formatResetRelative,
   formatSingleUnitRemaining,
@@ -44,10 +45,12 @@ function QuotaRow({
   label,
   percent,
   resetAt,
+  observationLabel,
 }: {
   label: string;
   percent: number | null;
   resetAt: string | null | undefined;
+  observationLabel: string | null;
 }) {
   const { t } = useTranslation();
   const clamped = percent === null ? 0 : Math.max(0, Math.min(100, percent));
@@ -79,7 +82,7 @@ function QuotaRow({
       </div>
       <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
         <Clock className="h-3 w-3 shrink-0" />
-        <span>{t("accounts.usage.resetAt", { label: formatQuotaResetLabel(resetAt ?? null) })}</span>
+        <span>{observationLabel ?? t("accounts.usage.resetAt", { label: formatQuotaResetLabel(resetAt) })}</span>
       </div>
     </div>
   );
@@ -240,6 +243,8 @@ function AccountUsagePanelContent({
   onReset,
 }: AccountUsagePanelProps) {
   const { t } = useTranslation();
+  const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
+  const status = normalizeStatus(account.status);
   const primaryState = useSmoothPercent(account.usage?.primaryRemainingPercent ?? null);
   const secondaryState = useSmoothPercent(account.usage?.secondaryRemainingPercent ?? null);
   const monthlyState = useSmoothPercent(account.usage?.monthlyRemainingPercent ?? null);
@@ -248,7 +253,7 @@ function AccountUsagePanelContent({
   const monthly = monthlyState.percent;
   const requestUsage = account.requestUsage ?? null;
   const hasRequestUsage = (requestUsage?.requestCount ?? 0) > 0;
-  const hasPrimaryWindow = account.windowMinutesPrimary != null || primaryState.everKnown;
+  const hasPrimaryWindow = account.primaryWindowNotStarted || account.windowMinutesPrimary != null || primaryState.everKnown;
   const hasSecondaryWindow = account.windowMinutesSecondary != null || secondaryState.everKnown;
   const hasMonthlyWindow = account.windowMinutesMonthly != null || monthlyState.everKnown;
   const weeklyOnly = !hasPrimaryWindow && hasSecondaryWindow;
@@ -264,11 +269,30 @@ function AccountUsagePanelContent({
       <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t("accounts.usage.title")}</h3>
       <div className={cn("grid gap-4", weeklyOnly || monthlyOnly ? "grid-cols-1" : "grid-cols-1 sm:grid-cols-2")}>
         {monthlyOnly ? (
-          <QuotaRow label={t("common.quota.monthly")} percent={monthly} resetAt={account.resetAtMonthly} />
+          <QuotaRow
+            label={t("common.quota.monthly")}
+            percent={monthly}
+            resetAt={account.resetAtMonthly}
+            observationLabel={formatQuotaObservation(status, account.recordedAtMonthly, dateDisplayFormat)}
+          />
         ) : (
           <>
-            {!weeklyOnly && <QuotaRow label="5h" percent={primary} resetAt={account.resetAtPrimary} />}
-            <QuotaRow label={t("common.quota.weekly")} percent={secondary} resetAt={account.resetAtSecondary} />
+            {!weeklyOnly && (
+              <QuotaRow
+                label="5h"
+                percent={primary}
+                resetAt={account.resetAtPrimary}
+                observationLabel={formatQuotaObservation(
+                  status, account.recordedAtPrimary, dateDisplayFormat, account.primaryWindowNotStarted,
+                )}
+              />
+            )}
+            <QuotaRow
+              label={t("common.quota.weekly")}
+              percent={secondary}
+              resetAt={account.resetAtSecondary}
+              observationLabel={formatQuotaObservation(status, account.recordedAtSecondary, dateDisplayFormat)}
+            />
           </>
         )}
       </div>

@@ -96,6 +96,10 @@ class AccountSummary(DashboardModel):
     reset_at_primary: datetime | None = None
     reset_at_secondary: datetime | None = None
     reset_at_monthly: datetime | None = None
+    recorded_at_primary: datetime | None = None
+    recorded_at_secondary: datetime | None = None
+    recorded_at_monthly: datetime | None = None
+    primary_window_not_started: bool = False
     window_minutes_primary: int | None = None
     window_minutes_secondary: int | None = None
     window_minutes_monthly: int | None = None

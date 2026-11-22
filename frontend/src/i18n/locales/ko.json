@@ -617,6 +617,8 @@
   "common.options.all": "전체",
   "common.options.allLower": "all",
   "common.options.none": "없음",
+  "common.quota.notStarted": "시작 전",
+  "common.quota.asOf": "{{time}} 기준",
   "common.quota.monthly": "Monthly",
   "common.quota.weekly": "Weekly",
   "common.reasoning.high": "High",

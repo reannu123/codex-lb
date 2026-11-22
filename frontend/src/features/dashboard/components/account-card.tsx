@@ -24,6 +24,7 @@ import {
   formatDateTimeInline,
   formatPercentNullable,
   formatLocalResetTime,
+  formatQuotaObservation,
   formatQuotaResetCountdown,
   formatQuotaResetLabel,
   parseDate,
@@ -51,18 +52,20 @@ function QuotaBar({
   percent,
   resetAt,
   compactNow,
+  observationLabel,
 }: {
   label: string;
   percent: number | null;
   resetAt: string | null | undefined;
   compactNow?: number;
+  observationLabel: string | null;
 }) {
   const clamped = percent === null ? 0 : Math.max(0, Math.min(100, percent));
   const hasPercent = percent !== null;
-  const resetDate = compactNow === undefined ? null : parseDate(resetAt);
-  const resetLabel = compactNow === undefined
+  const resetDate = compactNow === undefined || observationLabel !== null ? null : parseDate(resetAt);
+  const resetLabel = observationLabel ?? (compactNow === undefined
     ? formatQuotaResetLabel(resetAt)
-    : formatQuotaResetCountdown(resetDate, compactNow);
+    : formatQuotaResetCountdown(resetDate, compactNow));
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between text-xs">
@@ -112,7 +115,7 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
   const primaryRemaining = primaryState.percent;
   const secondaryRemaining = secondaryState.percent;
   const monthlyRemaining = monthlyState.percent;
-  const hasPrimaryWindow = account.windowMinutesPrimary != null || primaryState.everKnown ||
+  const hasPrimaryWindow = account.primaryWindowNotStarted || account.windowMinutesPrimary != null || primaryState.everKnown ||
     (compactNow !== undefined && account.resetAtPrimary != null);
   const hasSecondaryWindow = account.windowMinutesSecondary != null || secondaryState.everKnown ||
     (compactNow !== undefined && account.resetAtSecondary != null);
@@ -186,11 +189,35 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
       {/* Quota bars */}
       <div className={cn("mt-3.5 grid gap-3", showPrimary && showSecondary ? "grid-cols-2" : "grid-cols-1")}>
         {monthlyOnly ? (
-          <QuotaBar label={t("common.time.monthly")} percent={monthlyRemaining} resetAt={account.resetAtMonthly} compactNow={compactNow} />
+          <QuotaBar
+            label={t("common.time.monthly")}
+            percent={monthlyRemaining}
+            resetAt={account.resetAtMonthly}
+            compactNow={compactNow}
+            observationLabel={formatQuotaObservation(status, account.recordedAtMonthly, dateDisplayFormat)}
+          />
         ) : (
           <>
-            {showPrimary && <QuotaBar label="5h" percent={primaryRemaining} resetAt={account.resetAtPrimary} compactNow={compactNow} />}
-            {showSecondary && <QuotaBar label={t("common.time.weekly")} percent={secondaryRemaining} resetAt={account.resetAtSecondary} compactNow={compactNow} />}
+            {showPrimary && (
+              <QuotaBar
+                label="5h"
+                percent={primaryRemaining}
+                resetAt={account.resetAtPrimary}
+                compactNow={compactNow}
+                observationLabel={formatQuotaObservation(
+                  status, account.recordedAtPrimary, dateDisplayFormat, account.primaryWindowNotStarted,
+                )}
+              />
+            )}
+            {showSecondary && (
+              <QuotaBar
+                label={t("common.time.weekly")}
+                percent={secondaryRemaining}
+                resetAt={account.resetAtSecondary}
+                compactNow={compactNow}
+                observationLabel={formatQuotaObservation(status, account.recordedAtSecondary, dateDisplayFormat)}
+              />
+            )}
           </>
         )}
       </div>

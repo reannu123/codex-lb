@@ -21,6 +21,18 @@ describe("AccountList", () => {
     });
   }
 
+  it("renders the observation label in the dashboard quota table", () => {
+    const account = createAccountSummary({
+      status: "paused",
+      primaryWindowNotStarted: true,
+      recordedAtPrimary: "2026-01-01T11:37:00.000Z",
+    });
+
+    render(<AccountList accounts={[account]} />);
+
+    expect(screen.getByText(/^Not started · As of /)).toBeInTheDocument();
+  });
+
   it("renders a compact list with subscription and purchased credits", () => {
     render(
       <AccountList

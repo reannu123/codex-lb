@@ -19,6 +19,7 @@ import { formatCompactAccountId } from "@/utils/account-identifiers";
 import {
   formatDateTimeInline,
   formatPercentNullable,
+  formatQuotaObservation,
   formatQuotaResetLabel,
   formatSlug,
 } from "@/utils/formatters";
@@ -59,6 +60,7 @@ export function AccountListItem({
   const secondary = secondaryState.percent;
   const monthly = monthlyState.percent;
   const hasPrimaryWindow =
+    account.primaryWindowNotStarted ||
     account.windowMinutesPrimary != null ||
     primary !== null ||
     account.resetAtPrimary != null ||
@@ -144,6 +146,7 @@ export function AccountListItem({
             label={t("common.quota.monthly")}
             percent={monthly}
             resetAt={account.resetAtMonthly}
+            observationLabel={formatQuotaObservation(status, account.recordedAtMonthly, dateDisplayFormat)}
           />
         ) : null}
         {showPrimaryRow ? (
@@ -151,6 +154,7 @@ export function AccountListItem({
             label="5h"
             percent={primary}
             resetAt={account.resetAtPrimary}
+            observationLabel={formatQuotaObservation(status, account.recordedAtPrimary, dateDisplayFormat, account.primaryWindowNotStarted)}
           />
         ) : null}
         {showSecondaryRow ? (
@@ -158,6 +162,7 @@ export function AccountListItem({
             label={t("common.quota.weekly")}
             percent={secondary}
             resetAt={account.resetAtSecondary}
+            observationLabel={formatQuotaObservation(status, account.recordedAtSecondary, dateDisplayFormat)}
           />
         ) : null}
       </div>
@@ -211,10 +216,12 @@ function MiniQuotaRow({
   label,
   percent,
   resetAt,
+  observationLabel,
 }: {
   label: string;
   percent: number | null;
   resetAt: string | null | undefined;
+  observationLabel: string | null;
 }) {
   const { t } = useTranslation();
   return (
@@ -231,7 +238,7 @@ function MiniQuotaRow({
         testId={`mini-quota-track-${label.toLowerCase()}`}
       />
       <div className="text-[10px] text-muted-foreground">
-        {formatMiniQuotaResetLabel(resetAt ?? null, t)}
+        {observationLabel ?? formatMiniQuotaResetLabel(resetAt ?? null, t)}
       </div>
     </div>
   );

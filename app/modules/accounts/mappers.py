@@ -8,6 +8,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.usage.quota import apply_usage_quota
 from app.core.usage.refresh_policy import usage_freshness_horizon_seconds
+from app.core.usage.sliding_reset import reset_slides_with_observation
 from app.core.usage.types import UsageTrendBucket, UsageWindowRow
 from app.core.utils.masking import mask_email
 from app.core.utils.time import from_epoch_seconds
@@ -278,6 +279,16 @@ def _account_to_summary(
         reset_at_primary=reset_at_primary,
         reset_at_secondary=reset_at_secondary,
         reset_at_monthly=reset_at_monthly,
+        recorded_at_primary=effective_primary_usage.recorded_at if effective_primary_usage is not None else None,
+        recorded_at_secondary=effective_secondary_usage.recorded_at if effective_secondary_usage is not None else None,
+        recorded_at_monthly=monthly_usage.recorded_at if monthly_usage is not None else None,
+        primary_window_not_started=effective_primary_usage is not None
+        and effective_primary_usage.used_percent == 0
+        and reset_slides_with_observation(
+            reset_at=effective_primary_usage.reset_at,
+            recorded_at=effective_primary_usage.recorded_at,
+            window_minutes=effective_primary_usage.window_minutes,
+        ),
         window_minutes_primary=window_minutes_primary,
         window_minutes_secondary=window_minutes_secondary,
         window_minutes_monthly=window_minutes_monthly,

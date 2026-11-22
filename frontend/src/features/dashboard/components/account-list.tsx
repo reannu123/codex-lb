@@ -22,6 +22,7 @@ import { normalizeStatus, quotaBarColor, quotaBarTrack } from "@/utils/account-s
 import {
   formatDateTimeInline,
   formatPercentNullable,
+  formatQuotaObservation,
   formatQuotaResetLabel,
   formatSingleUnitRemaining,
   formatSlug,
@@ -70,12 +71,17 @@ function formatWarmupWindow(window: string): string {
   return window === "primary" || window === "primary_idle" ? "5h" : "weekly";
 }
 
-function quotaLabel(label: string, percent: number | null, resetAt: string | null | undefined) {
+function quotaLabel(
+  label: string,
+  percent: number | null,
+  resetAt: string | null | undefined,
+  observationLabel?: string | null,
+) {
   return {
     label,
     percent,
     percentLabel: formatPercentNullable(percent, 1),
-    resetLabel: formatQuotaResetLabel(resetAt ?? null),
+    resetLabel: observationLabel ?? formatQuotaResetLabel(resetAt),
   };
 }
 
@@ -235,22 +241,29 @@ function SortHeader({
 
 function AccountQuotaCells({ account }: { account: AccountSummary }) {
   const { t } = useTranslation();
+  const dateDisplayFormat = useDateDisplayFormatStore((s) => s.dateDisplayFormat);
+  const status = normalizeStatus(account.status);
   const primaryState = useSmoothPercent(account.usage?.primaryRemainingPercent ?? null);
   const secondaryState = useSmoothPercent(account.usage?.secondaryRemainingPercent ?? null);
   const monthlyState = useSmoothPercent(account.usage?.monthlyRemainingPercent ?? null);
-  const hasPrimaryWindow = account.windowMinutesPrimary != null || primaryState.everKnown;
+  const hasPrimaryWindow = account.primaryWindowNotStarted || account.windowMinutesPrimary != null || primaryState.everKnown;
   const hasSecondaryWindow = account.windowMinutesSecondary != null || secondaryState.everKnown;
   const hasMonthlyWindow = account.windowMinutesMonthly != null || monthlyState.everKnown;
   const monthlyOnly = hasMonthlyWindow && !hasPrimaryWindow && !hasSecondaryWindow;
   const weeklyOnly = !hasPrimaryWindow && hasSecondaryWindow;
-  const quotas = monthlyOnly
-    ? [quotaLabel("Monthly", monthlyState.percent, account.resetAtMonthly)]
-    : weeklyOnly
-      ? [quotaLabel("Weekly", secondaryState.percent, account.resetAtSecondary)]
-      : [
-          quotaLabel("5h", primaryState.percent, account.resetAtPrimary),
-          quotaLabel("Weekly", secondaryState.percent, account.resetAtSecondary),
-        ];
+  const monthly = quotaLabel(
+    "Monthly", monthlyState.percent, account.resetAtMonthly,
+    formatQuotaObservation(status, account.recordedAtMonthly, dateDisplayFormat),
+  );
+  const weekly = quotaLabel(
+    "Weekly", secondaryState.percent, account.resetAtSecondary,
+    formatQuotaObservation(status, account.recordedAtSecondary, dateDisplayFormat),
+  );
+  const primary = quotaLabel(
+    "5h", primaryState.percent, account.resetAtPrimary,
+    formatQuotaObservation(status, account.recordedAtPrimary, dateDisplayFormat, account.primaryWindowNotStarted),
+  );
+  const quotas = monthlyOnly ? [monthly] : weeklyOnly ? [weekly] : [primary, weekly];
   return (
     <div className="grid gap-1.5 text-xs">
       {quotas.map((quota) => (
@@ -260,7 +273,7 @@ function AccountQuotaCells({ account }: { account: AccountSummary }) {
           <QuotaMeter percent={quota.percent} />
           <span className="inline-flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
             <Clock className="h-3 w-3 shrink-0" aria-hidden="true" />
-            <span className="truncate">{quota.resetLabel}</span>
+            <span className="min-w-0 wrap-anywhere">{quota.resetLabel}</span>
           </span>
         </div>
       ))}

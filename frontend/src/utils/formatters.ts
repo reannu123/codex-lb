@@ -1,3 +1,4 @@
+import type { DashboardAccountStatus } from "@/utils/account-status";
 import { RESET_ERROR_LABEL } from "@/utils/constants";
 import { getTimeFormatPreference, type TimeFormatPreference } from "@/hooks/use-time-format";
 import { getDateDisplayFormat, type DateDisplayFormat } from "@/hooks/use-date-format";
@@ -395,6 +396,26 @@ export function formatCountdown(seconds: number): string {
   const minutes = Math.floor(clamped / 60);
   const remainder = clamped % 60;
   return `${minutes}:${String(remainder).padStart(2, "0")}`;
+}
+
+export function formatQuotaObservation(
+  status: DashboardAccountStatus,
+  recordedAt: string | null | undefined,
+  dateDisplayFormat: DateDisplayFormat,
+  notStarted = false,
+): string | null {
+  const samplingStopped = status === "paused" || status === "reauth" || status === "deactivated";
+  if (!samplingStopped) {
+    return notStarted ? t("common.quota.notStarted") : null;
+  }
+
+  const sampleTime = formatDateTimeInline(recordedAt, dateDisplayFormat);
+  const asOf = sampleTime === "--" ? null : t("common.quota.asOf", { time: sampleTime });
+  if (notStarted) {
+    const label = t("common.quota.notStarted");
+    return asOf ? `${label} · ${asOf}` : label;
+  }
+  return asOf ?? "--";
 }
 
 export function formatQuotaResetLabel(resetAt: string | null | undefined): string {
