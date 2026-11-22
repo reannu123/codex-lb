@@ -617,6 +617,8 @@
   "common.options.all": "All",
   "common.options.allLower": "all",
   "common.options.none": "None",
+  "common.quota.notStarted": "Not started",
+  "common.quota.asOf": "As of {{time}}",
   "common.quota.monthly": "Monthly",
   "common.quota.weekly": "Weekly",
   "common.reasoning.high": "High",

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AccountListItem } from "@/features/accounts/components/account-list-item";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { createAccountSummary } from "@/test/mocks/factories";
+import { formatDateTimeInline } from "@/utils/formatters";
 
 describe("AccountListItem", () => {
   beforeEach(() => {
@@ -14,6 +15,24 @@ describe("AccountListItem", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it.each(["paused", "reauth_required", "deactivated"])("shows each last observation for %s accounts", (status) => {
+    const recordedAtPrimary = "2026-01-01T11:37:00.000Z";
+    const recordedAtSecondary = "2026-01-01T11:35:00.000Z";
+    const account = createAccountSummary({
+      status,
+      primaryWindowNotStarted: true,
+      recordedAtPrimary,
+      recordedAtSecondary,
+      resetAtPrimary: "2026-01-01T16:37:00.000Z",
+    });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText(`Not started · As of ${formatDateTimeInline(recordedAtPrimary)}`)).toBeInTheDocument();
+    expect(screen.getByText(`As of ${formatDateTimeInline(recordedAtSecondary)}`)).toBeInTheDocument();
+    expect(screen.queryByText(/Reset in/)).not.toBeInTheDocument();
   });
 
   it("renders neutral quota track when secondary remaining percent is unknown", () => {

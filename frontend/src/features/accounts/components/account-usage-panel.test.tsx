@@ -17,6 +17,19 @@ describe("AccountUsagePanel", () => {
     vi.useRealTimers();
   });
 
+  it("shows the unstarted observation for a paused primary window", () => {
+    const account = createAccountSummary({
+      status: "paused",
+      primaryWindowNotStarted: true,
+      recordedAtPrimary: "2026-01-01T11:37:00.000Z",
+    });
+
+    render(<AccountUsagePanel account={account} />);
+
+    expect(screen.getByText(/^Not started · As of /)).toBeInTheDocument();
+    expect(screen.queryByText(/Reset in/)).not.toBeInTheDocument();
+  });
+
   it("shows '--' for missing quota percent instead of 0%", () => {
     const account = createAccountSummary({
       usage: {

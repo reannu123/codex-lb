@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AccountCard } from "@/features/dashboard/components/account-card";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { createAccountSummary } from "@/test/mocks/factories";
+import { formatDateTimeInline } from "@/utils/formatters";
 
 afterEach(() => {
   act(() => {
@@ -13,6 +14,35 @@ afterEach(() => {
 });
 
 describe("AccountCard", () => {
+  it("replaces the compact reset countdown and reset time with the paused observation", () => {
+    const recordedAt = "2026-01-01T11:37:00.000Z";
+    const account = createAccountSummary({
+      status: "paused",
+      primaryWindowNotStarted: true,
+      recordedAtPrimary: recordedAt,
+      resetAtPrimary: "2026-01-01T16:37:00.000Z",
+    });
+
+    const { container } = render(<AccountCard account={account} compactNow={Date.parse("2026-01-01T12:00:00Z")} />);
+
+    expect(screen.getByText(`Not started · As of ${formatDateTimeInline(recordedAt)}`)).toBeInTheDocument();
+    expect(screen.queryByText("in 4h 37m")).not.toBeInTheDocument();
+    expect(container.querySelector('time[datetime="2026-01-01T16:37:00.000Z"]')).not.toBeInTheDocument();
+  });
+
+  it("keeps the live reset for a running window and labels an unstarted window on refresh", () => {
+    const account = createAccountSummary({ resetAtPrimary: "2026-01-01T16:37:00.000Z" });
+    const compactNow = Date.parse("2026-01-01T12:00:00Z");
+    const { rerender } = render(<AccountCard account={account} compactNow={compactNow} />);
+
+    expect(screen.getByText("in 4h 37m")).toBeInTheDocument();
+
+    rerender(<AccountCard account={{ ...account, primaryWindowNotStarted: true }} compactNow={compactNow} />);
+
+    expect(screen.getByText("Not started")).toBeInTheDocument();
+    expect(screen.queryByText("in 4h 37m")).not.toBeInTheDocument();
+  });
+
   it("renders both 5h and weekly quota bars for regular accounts", () => {
     const account = createAccountSummary();
     render(<AccountCard account={account} />);

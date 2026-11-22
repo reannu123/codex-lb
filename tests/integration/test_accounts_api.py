@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import json
 from copy import copy
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -12,7 +12,8 @@ from app.core.clients.rate_limit_reset_credits import RateLimitResetCreditsSnaps
 from app.core.clients.usage import ConsumeRateLimitResetCreditResponse, UsageFetchError
 from app.core.crypto import TokenEncryptor
 from app.core.usage.models import UsagePayload
-from app.db.models import Account, AccountStatus
+from app.core.utils.time import naive_utc_to_epoch, utcnow
+from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import SessionLocal
 from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
 
@@ -70,6 +71,78 @@ async def test_import_and_list_accounts(async_client):
     accounts = list_response.json()["accounts"]
     account = next(account for account in accounts if account["accountId"] == expected_account_id)
     assert "usageRefreshedAt" not in account
+    assert account["primaryWindowNotStarted"] is False
+    assert account["recordedAtPrimary"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("offset_seconds", "sample_age_minutes", "expected"),
+    [(-31, 23, False), (-30, 23, True), (30, 23, True), (31, 23, False), (0, 360, True)],
+)
+async def test_account_list_reports_latest_primary_observation(
+    async_client, offset_seconds, sample_age_minutes, expected
+):
+    account_id = "quota-observation"
+    encryptor = TokenEncryptor()
+    now = utcnow().replace(microsecond=0)
+    observed = now - timedelta(minutes=sample_age_minutes)
+    previous = observed - timedelta(minutes=1)
+    reset = observed + timedelta(hours=5, seconds=offset_seconds)
+
+    async with SessionLocal() as session:
+        session.add(
+            Account(
+                id=account_id,
+                email="quota-observation@example.com",
+                plan_type="plus",
+                access_token_encrypted=encryptor.encrypt("access"),
+                refresh_token_encrypted=encryptor.encrypt("refresh"),
+                id_token_encrypted=encryptor.encrypt("id"),
+                last_refresh=now,
+                status=AccountStatus.PAUSED,
+            )
+        )
+        await session.flush()
+        session.add_all(
+            [
+                UsageHistory(
+                    account_id=account_id,
+                    window="primary",
+                    recorded_at=previous,
+                    used_percent=0,
+                    reset_at=naive_utc_to_epoch(previous + timedelta(hours=1)),
+                    window_minutes=300,
+                ),
+                UsageHistory(
+                    account_id=account_id,
+                    window="primary",
+                    recorded_at=observed,
+                    used_percent=0,
+                    reset_at=naive_utc_to_epoch(reset),
+                    window_minutes=300,
+                ),
+                UsageHistory(
+                    account_id=account_id,
+                    window="secondary",
+                    recorded_at=previous,
+                    used_percent=25,
+                    reset_at=naive_utc_to_epoch(previous + timedelta(days=6)),
+                    window_minutes=10_080,
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    account = next(account for account in response.json()["accounts"] if account["accountId"] == account_id)
+    assert account["status"] == "paused"
+    assert account["primaryWindowNotStarted"] is expected
+    assert account["recordedAtPrimary"] == f"{observed.isoformat()}Z"
+    assert account["recordedAtSecondary"] == f"{previous.isoformat()}Z"
+    assert account["resetAtPrimary"] == (f"{reset.isoformat()}Z" if reset > now else None)
+    assert account["usage"]["primaryRemainingPercent"] == (100.0 if reset > now else None)
 
 
 @pytest.mark.asyncio

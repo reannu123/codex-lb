@@ -617,6 +617,8 @@
   "common.options.all": "全部",
   "common.options.allLower": "全部",
   "common.options.none": "无",
+  "common.quota.notStarted": "未开始",
+  "common.quota.asOf": "截至 {{time}}",
   "common.quota.monthly": "月度",
   "common.quota.weekly": "每周",
   "common.reasoning.high": "高",

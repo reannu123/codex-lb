@@ -20,6 +20,12 @@ from app.core.plan_types import account_plan_matches_allowed, normalize_account_
 from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.usage.pricing import get_pricing_for_model
+from app.core.usage.sliding_reset import (
+    DEFAULT_ROLLING_WINDOW_SECONDS,
+    SLIDING_RESET_TOLERANCE_SECONDS,
+    reset_slides_with_observation,
+    rolling_window_seconds,
+)
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, DashboardSettings, UsageHistory
 from app.modules.accounts.auth_manager import AuthManager
@@ -35,15 +41,11 @@ _DEFAULT_WARMUP_INSTRUCTIONS = "Reply with OK only."
 _TERMINAL_ERROR_EVENTS = {"response.failed", "response.incomplete", "error"}
 _QUOTA_ERROR_CODES = {"insufficient_quota", "quota_exceeded", "rate_limit_exceeded", "usage_limit_reached"}
 _MAX_CONCURRENT_WARMUP_SENDS = 4
-_ROLLING_WINDOW_SECONDS = 300 * 60
 _SHORT_WINDOW_MAX_MINUTES = 24 * 60
 _STAGGER_SLOT_GRACE_SECONDS = 60
 # Upper bound on how long after its slot opens an idle account may still be
 # pre-started, so a delayed refresh does not skip the whole cycle.
 _STAGGER_CATCH_UP_MAX_SECONDS = 15 * 60
-# A not-started short window reports reset_at = observed_at + window. Allow
-# for the fetch-to-write delay and upstream rounding of reset_after_seconds.
-_SLIDING_RESET_TOLERANCE_SECONDS = 30
 # Operator-excluded states leave the stagger cohort. Transient blocks
 # (rate_limited, quota_exceeded) keep their slot so phases stay stable.
 _STAGGER_COHORT_EXCLUDED_STATUSES = frozenset(
@@ -901,7 +903,7 @@ def usage_reset_confirmed(*, before: UsageHistory | None, after: UsageHistory | 
         return False
     before_observed_at = naive_utc_to_epoch(before.recorded_at)
     observed_at = naive_utc_to_epoch(after.recorded_at)
-    window_started_at = after.reset_at - _rolling_window_seconds(after)
+    window_started_at = after.reset_at - rolling_window_seconds(after.window_minutes)
     quota_recovered = after.used_percent < before.used_percent
     crossed_previous_reset = before_observed_at <= before.reset_at <= observed_at < after.reset_at
     reanchored_between_samples = (
@@ -997,7 +999,7 @@ def _build_staggered_idle_candidate(
     # traffic; stale or carried-over usage history never does.
     if refresh_started_at is None or after.recorded_at < refresh_started_at:
         return None
-    window_seconds = _rolling_window_seconds(after)
+    window_seconds = rolling_window_seconds(after.window_minutes)
     if not _short_window_not_started(before=before_primary.get(account.id), after=after):
         return None
     due = _staggered_idle_due(
@@ -1049,13 +1051,6 @@ def _stagger_cohort(
     return sorted(members)
 
 
-def _reset_slides_with_observation(entry: UsageHistory) -> bool:
-    if entry.reset_at is None or entry.recorded_at is None:
-        return False
-    observed_at = naive_utc_to_epoch(entry.recorded_at)
-    return abs(entry.reset_at - observed_at - _rolling_window_seconds(entry)) <= _SLIDING_RESET_TOLERANCE_SECONDS
-
-
 def _short_window_not_started(*, before: UsageHistory | None, after: UsageHistory) -> bool:
     """Whether consecutive samples show a short window that has not started.
 
@@ -1066,30 +1061,25 @@ def _short_window_not_started(*, before: UsageHistory | None, after: UsageHistor
     by the time of the new observation. A previous window that is still
     running means real usage owns the account's phase and is never touched.
     """
-    if not _reset_slides_with_observation(after):
+    if not reset_slides_with_observation(
+        reset_at=after.reset_at, recorded_at=after.recorded_at, window_minutes=after.window_minutes
+    ):
         return False
     if before is None or before.reset_at is None or before.recorded_at is None:
         return False
     if before.recorded_at > after.recorded_at:
         return False
-    if _reset_slides_with_observation(before):
+    if reset_slides_with_observation(
+        reset_at=before.reset_at, recorded_at=before.recorded_at, window_minutes=before.window_minutes
+    ):
         return True
-    return before.reset_at <= naive_utc_to_epoch(after.recorded_at) + _SLIDING_RESET_TOLERANCE_SECONDS
+    return before.reset_at <= naive_utc_to_epoch(after.recorded_at) + SLIDING_RESET_TOLERANCE_SECONDS
 
 
 @dataclass(frozen=True, slots=True)
 class _StaggeredIdleDue:
     cycle_end: int
     slot_offset_seconds: int
-
-
-def _rolling_window_seconds(entry: UsageHistory) -> int:
-    # Derive the rolling cycle from the observed primary window duration so
-    # the stagger tracks whatever short window upstream reports; 300 minutes
-    # remains the fallback when duration metadata is missing.
-    if entry.window_minutes is not None and entry.window_minutes > 0:
-        return int(entry.window_minutes) * 60
-    return _ROLLING_WINDOW_SECONDS
 
 
 def _stagger_catch_up_seconds(*, window_seconds: int, cohort_size: int, usage_refresh_interval_seconds: int) -> int:
@@ -1106,7 +1096,7 @@ def _staggered_idle_due(
     account_ids: list[str],
     *,
     now: datetime,
-    window_seconds: int = _ROLLING_WINDOW_SECONDS,
+    window_seconds: int = DEFAULT_ROLLING_WINDOW_SECONDS,
     usage_refresh_interval_seconds: int = _STAGGER_SLOT_GRACE_SECONDS,
 ) -> _StaggeredIdleDue | None:
     """Return the account's slot on the epoch-aligned UTC grid if it is claimable now.
