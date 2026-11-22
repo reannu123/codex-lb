@@ -185,9 +185,12 @@ async def test_scheduler_repository_path_scopes_selected_account_history_and_fol
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("pre_reset_usage", "warms"), [(99.0, True), (98.99, False)])
 async def test_scheduler_recovers_rate_limited_free_before_monthly_reset_warmup(
     db_setup,
     monkeypatch: pytest.MonkeyPatch,
+    pre_reset_usage: float,
+    warms: bool,
 ) -> None:
     del db_setup
     now = int(time.time())
@@ -218,7 +221,7 @@ async def test_scheduler_recovers_rate_limited_free_before_monthly_reset_warmup(
         )
         await UsageRepository(session).add_entry(
             account.id,
-            100.0,
+            pre_reset_usage,
             window="monthly",
             recorded_at=before_recorded_at,
             reset_at=before_reset_at,
@@ -245,7 +248,7 @@ async def test_scheduler_recovers_rate_limited_free_before_monthly_reset_warmup(
             async with SessionLocal() as session:
                 await UsageRepository(session).add_entry(
                     account.id,
-                    0.0,
+                    1.0,  # Skip the separate one-time warm-up for unused Free quota.
                     window="monthly",
                     recorded_at=after_recorded_at,
                     reset_at=after_reset_at,
@@ -287,17 +290,21 @@ async def test_scheduler_recovers_rate_limited_free_before_monthly_reset_warmup(
     scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
 
     assert await scheduler._refresh_once() == 60.0
-    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
+    assert sender.calls == ([(account.id, "gpt-5.1-codex-mini")] if warms else [])
     async with SessionLocal() as session:
         persisted_account = await AccountsRepository(session).get_by_id(account.id)
-        attempt = (await LimitWarmupRepository(session).latest_by_account([account.id]))[account.id]
+        attempt = (await LimitWarmupRepository(session).latest_by_account([account.id])).get(account.id)
     assert persisted_account is not None
     assert (persisted_account.status, persisted_account.reset_at, persisted_account.blocked_at) == (
         AccountStatus.ACTIVE,
         None,
         None,
     )
-    assert (attempt.window, attempt.reset_at, attempt.status) == ("monthly", after_reset_at, "succeeded")
+    if warms:
+        assert attempt is not None
+        assert (attempt.window, attempt.reset_at, attempt.status) == ("monthly", after_reset_at, "succeeded")
+    else:
+        assert attempt is None
 
 
 @pytest.mark.asyncio
@@ -469,6 +476,7 @@ async def test_scheduler_restart_uses_anchored_persisted_evidence(
             limit_warmup_enabled=True,
             limit_warmup_windows="secondary",
             limit_warmup_model="gpt-5.1-codex-mini",
+            limit_warmup_exhausted_threshold_percent=40.0,
         )
         if existing_attempt:
             attempt = await LimitWarmupRepository(session).try_create_attempt(

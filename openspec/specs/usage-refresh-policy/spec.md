@@ -435,19 +435,31 @@ This credit-aware interpretation MUST be shared by proxy account selection and a
 - **WHEN** proxy selection or account-summary mapping derives the effective status
 - **THEN** the account remains `paused` or `deactivated`
 
-### Requirement: Reset-confirmed limit warm-up
+### Requirement: Eligibility for reset-confirmed limit warm-up
 
-The system SHALL support an optional limit warm-up mechanism that is disabled by default. When enabled globally and for an account, background usage refresh MAY send one minimal upstream Responses request after it confirms that a selected quota window moved into a newly available reset window. Eligibility SHALL depend on a real reset transition and the configured post-reset availability gate, not on whether the previous window was exhausted. The legacy `limit_warmup_exhausted_threshold_percent` setting MUST NOT gate reset-confirmed eligibility.
+The system SHALL support an optional limit warm-up mechanism that is disabled by default. When enabled globally and for an account, background usage refresh MAY send one minimal upstream Responses request after it confirms that a selected quota window moved into a newly available reset window. Eligibility SHALL require a real reset transition, sufficient post-reset availability, and a pre-reset sample for the same selected quota window with `used_percent` at or above `limit_warmup_exhausted_threshold_percent` (dashboard “Min usage %”, default 99.0). The minimum SHALL apply to reset-confirmed warm-up only, including when the selected window resolves to a Free monthly window. Blocked-account recovery MUST evaluate reset evidence independently of this minimum.
 
 Background usage refresh MUST complete any applicable blocked-status reconciliation before warm-up evaluation. Candidate evaluation and the sender's fresh preflight check MUST both require the account to be `active`; paused, deactivated, `reauth_required`, `rate_limited`, and `quota_exceeded` accounts MUST NOT receive warm-up traffic. When a reset-confirmed recovery uses persisted transition evidence, warm-up SHALL reuse that same before/after pair so the new account/window/reset tuple enters the ordinary durable deduplication path.
 
 The configured `limit_warmup_cooldown_seconds` SHALL gate only staggered idle warm-up candidates. It MUST NOT suppress a reset-confirmed candidate for a distinct account/window/reset tuple, which remains protected by the durable atomic attempt claim for that tuple.
 
-#### Scenario: Warm-up follows a real reset regardless of prior usage
+#### Scenario: Warm-up qualifies at the pre-reset minimum
 - **GIVEN** limit warm-up is enabled globally and for an active account
-- **AND** the account's previous usage sample for a selected window reports any usage below or at exhaustion
-- **WHEN** background usage refresh records a newer sample that proves a real reset for that window and satisfies the configured availability gate
-- **THEN** the system sends at most one warm-up request for that account/window/reset tuple
+- **AND** the selected window's pre-reset usage equals the configured minimum
+- **WHEN** background usage refresh confirms a reset and the new sample meets the configured availability gate
+- **THEN** the reset qualifies for at most one warm-up request for that account/window/reset tuple
+
+#### Scenario: Warm-up skips a selected window below the pre-reset minimum
+- **GIVEN** limit warm-up is enabled globally and for an active account
+- **AND** a selected window's pre-reset usage is below the configured minimum
+- **WHEN** background usage refresh confirms a reset and the new sample meets the configured availability gate
+- **THEN** the system MUST NOT claim an attempt or send a reset-confirmed warm-up for that account/window/reset tuple
+
+#### Scenario: Monthly recovery proceeds below the warm-up minimum
+- **GIVEN** a rate-limited Free account has qualifying monthly reset recovery evidence and its pre-reset usage is below the warm-up minimum
+- **WHEN** marker-guarded recovery succeeds
+- **THEN** the scheduler SHALL restore the account to active and clear its block markers
+- **AND** the reset MUST NOT qualify for reset-confirmed warm-up
 
 #### Scenario: Staggered idle cooldown does not suppress a distinct reset tuple
 - **GIVEN** an account has a recent warm-up attempt inside `limit_warmup_cooldown_seconds`
