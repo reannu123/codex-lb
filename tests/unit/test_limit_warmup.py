@@ -676,7 +676,8 @@ async def test_reset_confirmed_candidate_sends_one_warmup() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reset_warms_after_pre_reset_99_percent_usage() -> None:
+@pytest.mark.parametrize(("pre_reset_usage", "expected_sends"), [(98.99, 0), (99.0, 1), (100.0, 1)])
+async def test_reset_warmup_uses_default_pre_reset_minimum(pre_reset_usage: float, expected_sends: int) -> None:
     repo = FakeWarmupRepo()
     logs = FakeRequestLogsRepo()
     sender = FakeSender()
@@ -685,20 +686,25 @@ async def test_reset_warms_after_pre_reset_99_percent_usage() -> None:
 
     await service.run_after_usage_refresh(
         accounts=[account],
-        settings=_settings(limit_warmup_exhausted_threshold_percent=99.0),
-        before_primary={account.id: _usage(account.id, used_percent=99.0, reset_at=1000)},
+        settings=_settings(),
+        before_primary={account.id: _usage(account.id, used_percent=pre_reset_usage, reset_at=1000)},
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
         after_secondary={},
     )
 
-    assert len(sender.calls) == 1
-    assert len(repo.rows) == 1
-    assert repo.rows[0].status == "succeeded"
+    assert len(sender.calls) == expected_sends
+    assert [row.status for row in repo.rows] == ["succeeded"] * expected_sends
 
 
 @pytest.mark.asyncio
-async def test_reset_warms_regardless_of_pre_reset_usage() -> None:
+@pytest.mark.parametrize(
+    ("minimum", "pre_reset_usage", "expected_sends"),
+    [(15.0, 14.99, 0), (15.0, 15.0, 1), (15.0, 15.01, 1), (100.0, 99.99, 0), (100.0, 100.0, 1)],
+)
+async def test_reset_warmup_uses_configured_pre_reset_minimum(
+    minimum: float, pre_reset_usage: float, expected_sends: int
+) -> None:
     repo = FakeWarmupRepo()
     sender = FakeSender()
     service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
@@ -706,15 +712,50 @@ async def test_reset_warms_regardless_of_pre_reset_usage() -> None:
 
     await service.run_after_usage_refresh(
         accounts=[account],
-        settings=_settings(limit_warmup_exhausted_threshold_percent=99.0),
-        before_primary={account.id: _usage(account.id, used_percent=15.0, reset_at=1000)},
+        settings=_settings(limit_warmup_exhausted_threshold_percent=minimum),
+        before_primary={account.id: _usage(account.id, used_percent=pre_reset_usage, reset_at=1000)},
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
         after_secondary={},
     )
 
-    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
-    assert [(row.window, row.reset_at, row.status) for row in repo.rows] == [("primary", 2000, "succeeded")]
+    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")] * expected_sends
+    assert [(row.window, row.reset_at, row.status) for row in repo.rows] == [
+        ("primary", 2000, "succeeded")
+    ] * expected_sends
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pre_reset_usage", [float("nan"), float("inf"), float("-inf")])
+async def test_scheduled_reset_skips_nonfinite_pre_reset_usage(pre_reset_usage: float) -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+    before = _usage(
+        account.id,
+        used_percent=pre_reset_usage,
+        reset_at=1000,
+        recorded_at=datetime.fromtimestamp(900, tz=timezone.utc).replace(tzinfo=None),
+    )
+    after = _usage(
+        account.id,
+        used_percent=0,
+        reset_at=19_000,
+        recorded_at=datetime.fromtimestamp(1100, tz=timezone.utc).replace(tzinfo=None),
+    )
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(),
+        before_primary={account.id: before},
+        before_secondary={},
+        after_primary={account.id: after},
+        after_secondary={},
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
 
 
 @pytest.mark.asyncio
@@ -728,7 +769,7 @@ async def test_early_reset_reanchor_uses_sampling_interval() -> None:
 
     await service.run_after_usage_refresh(
         accounts=[account],
-        settings=_settings(),
+        settings=_settings(limit_warmup_exhausted_threshold_percent=23.0),
         before_primary={
             account.id: _usage(
                 account.id,
@@ -754,7 +795,7 @@ async def test_early_reset_reanchor_uses_sampling_interval() -> None:
 
 
 @pytest.mark.asyncio
-async def test_full_window_reset_warms_when_usage_was_already_zero() -> None:
+async def test_full_window_reset_does_not_warm_when_pre_reset_usage_was_zero() -> None:
     repo = FakeWarmupRepo()
     sender = FakeSender()
     service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
@@ -769,8 +810,8 @@ async def test_full_window_reset_warms_when_usage_was_already_zero() -> None:
         after_secondary={},
     )
 
-    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
-    assert [(row.window, row.reset_at, row.status) for row in repo.rows] == [("primary", 19_000, "succeeded")]
+    assert sender.calls == []
+    assert repo.rows == []
 
 
 @pytest.mark.asyncio
@@ -1081,7 +1122,17 @@ async def test_min_available_quota_threshold_uses_remaining_percent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_both_selected_windows_warm_primary_and_secondary_resets() -> None:
+@pytest.mark.parametrize(
+    ("primary_usage", "secondary_usage", "expected_attempts"),
+    [
+        (100.0, 100.0, [("primary", 2000), ("secondary", 20_000)]),
+        (100.0, 98.0, [("primary", 2000)]),
+        (98.0, 100.0, [("secondary", 20_000)]),
+    ],
+)
+async def test_pre_reset_minimum_applies_to_each_selected_window(
+    primary_usage: float, secondary_usage: float, expected_attempts: list[tuple[str, int]]
+) -> None:
     repo = FakeWarmupRepo()
     sender = FakeSender()
     service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
@@ -1090,17 +1141,16 @@ async def test_both_selected_windows_warm_primary_and_secondary_resets() -> None
     await service.run_after_usage_refresh(
         accounts=[account],
         settings=_settings(limit_warmup_windows="both"),
-        before_primary={account.id: _usage(account.id, used_percent=100, reset_at=1000)},
-        before_secondary={account.id: _usage(account.id, used_percent=100, reset_at=10_000, window="secondary")},
+        before_primary={account.id: _usage(account.id, used_percent=primary_usage, reset_at=1000)},
+        before_secondary={
+            account.id: _usage(account.id, used_percent=secondary_usage, reset_at=10_000, window="secondary")
+        },
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
         after_secondary={account.id: _usage(account.id, used_percent=0, reset_at=20_000, window="secondary")},
     )
 
-    assert sender.calls == [(account.id, "gpt-5.1-codex-mini"), (account.id, "gpt-5.1-codex-mini")]
-    assert [(row.window, row.reset_at, row.status) for row in repo.rows] == [
-        ("primary", 2000, "succeeded"),
-        ("secondary", 20_000, "succeeded"),
-    ]
+    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")] * len(expected_attempts)
+    assert [(row.window, row.reset_at) for row in repo.rows] == expected_attempts
 
 
 @pytest.mark.asyncio
@@ -1651,7 +1701,7 @@ async def test_regular_warmup_dedupes_same_reset_across_after_reset_at_jitter() 
         await service.run_after_usage_refresh(
             accounts=[account],
             settings=settings,
-            before_primary={account.id: _usage(account.id, used_percent=98.0, reset_at=1000)},
+            before_primary={account.id: _usage(account.id, used_percent=99.0, reset_at=1000)},
             before_secondary={},
             after_primary={account.id: _usage(account.id, used_percent=0.0, reset_at=reset_at)},
             after_secondary={},
