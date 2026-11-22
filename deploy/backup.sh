@@ -8,7 +8,8 @@
 # byte-identical (sha256), runs integrity_check and row counts on a scratch copy,
 # writes SHA256SUMS + manifest.json, then restarts the container if it was
 # running (unless --leave-stopped). Any failure prints "BACKUP FAILED", exits
-# non-zero and leaves the attempt as <name>.failed; it is never a valid backup.
+# non-zero, leaves the attempt as <name>.failed (never a valid backup) and
+# restarts a previously running app even with --leave-stopped.
 set -euo pipefail
 OPERATION=BACKUP
 # shellcheck source=deploy/lib.sh
@@ -43,7 +44,9 @@ finish() {
   if [ "${status}" -ne 0 ] && [ -d "${partial}" ]; then
     mv "${partial}" "${dest}.failed" && log "Left the failed attempt at ${dest}.failed"
   fi
-  if "${was_running}" && ! "${leave_stopped}"; then
+  # --leave-stopped applies only to a successful backup: a failed one always
+  # brings a previously running app back on its current image.
+  if "${was_running}" && { [ "${status}" -ne 0 ] || ! "${leave_stopped}"; }; then
     log "Starting ${CONTAINER} again..."
     "${DOCKER}" start "${CONTAINER}" >/dev/null || { log "BACKUP: could not restart ${CONTAINER}"; status=1; }
   fi

@@ -150,6 +150,17 @@ def test_corrupt_store_fails_loudly_and_restarts(env: dict[str, str]) -> None:
     assert docker_state(env)["containers"]["codex-lb"]["running"] is True
 
 
+def test_failed_leave_stopped_backup_still_restarts(env: dict[str, str]) -> None:
+    store = Path(env["CODEX_LB_DATA_DIR"]) / "store.db"
+    raw = bytearray(store.read_bytes())
+    raw[4096 : 4096 + 12] = b"\xff" * 12  # page 2 b-tree header
+    store.write_bytes(bytes(raw))
+
+    result = run("backup.sh", env, "--leave-stopped")
+    assert result.returncode != 0 and "BACKUP FAILED" in result.stderr
+    assert docker_state(env)["containers"]["codex-lb"]["running"] is True
+
+
 def test_missing_key_fails(env: dict[str, str]) -> None:
     (Path(env["CODEX_LB_DATA_DIR"]) / "encryption.key").unlink()
     result = run("backup.sh", env)
