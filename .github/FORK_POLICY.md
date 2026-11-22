@@ -54,6 +54,15 @@ published: a rerun for a superseded commit publishes nothing, and `fork-main` is
 only if the commit is still the tip at promotion time. It never pushes `latest` or release
 tags. Deploying an image is a separate step that needs the owner's direct approval.
 
+After a publish, the same workflow's `promote-production` job runs
+[`deploy/promote-production.py`](../deploy/promote-production.py). It opens a pull request
+into `deploy/production`, the branch Portainer deploys with GitOps updates off, that changes
+only the image digest. It reads the deployed commit from the
+`org.opencontainers.image.revision` label of the currently pinned image and refuses unless
+the new image's label is the published commit and that commit is on `main` and descends from
+the deployed one. It pushes only a new `promote/production-<sha12>` branch, never
+`deploy/production`, and never merges. Merging and deploying stay with the owner.
+
 ## Broad suites
 
 [`fork-ci-broad.yml`](workflows/fork-ci-broad.yml) is run manually from the Actions tab. It
