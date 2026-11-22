@@ -34,7 +34,8 @@ A PR may merge only when all of these hold on its **current head SHA**:
 4. Behavior, API, schema, or dashboard changes carry an OpenSpec change folder
    (AGENTS.md "Workflow"). A PR does one thing.
 5. For agent-prepared PRs, the orchestrator verifies the gates and coordinates each
-   merge. Production deployment always needs the owner's direct approval.
+   merge. Production deployment always needs the owner's direct approval
+   ([runbook](../deploy/README.md)).
 
 Once this policy is adopted, `main` branch protection requires `Fork CI required` and
 blocks force pushes and deletion. Until then the gates above are enforced by review and
