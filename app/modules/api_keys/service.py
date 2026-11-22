@@ -19,10 +19,10 @@ from app.core.clients.thread_cache_identity import (
     normalize_thread_cache_identity_mode,
 )
 from app.core.exceptions import ProxyApiKeyAccountScopeEmpty
+from app.core.usage.price_overrides import get_subscription_pricing
 from app.core.usage.pricing import (
     UsageTokens,
     calculate_cost_from_usage,
-    get_pricing_for_model,
 )
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import to_utc_naive, utcnow
@@ -1840,18 +1840,10 @@ def _reserve_cost_budget_microdollars(
 ) -> int:
     if not model:
         return _unknown_model_reserve_cost_budget_microdollars(input_tokens=input_tokens, output_tokens=output_tokens)
-    cost_microdollars = _calculate_cost_microdollars(
-        model,
-        input_tokens,
-        output_tokens,
-        0,
-        service_tier,
-    )
-    return (
-        cost_microdollars
-        if cost_microdollars > 0
-        else _unknown_model_reserve_cost_budget_microdollars(input_tokens=input_tokens, output_tokens=output_tokens)
-    )
+    cost_usd = _calculate_subscription_cost_usd(model, input_tokens, output_tokens, 0, service_tier)
+    if cost_usd is None:
+        return _unknown_model_reserve_cost_budget_microdollars(input_tokens=input_tokens, output_tokens=output_tokens)
+    return max(1, int(cost_usd * 1_000_000)) if cost_usd > 0 else 0
 
 
 def _unknown_model_reserve_cost_budget_microdollars(*, input_tokens: int, output_tokens: int) -> int:
@@ -2102,19 +2094,27 @@ def _calculate_cost_microdollars(
     cached_input_tokens: int,
     service_tier: str | None = None,
 ) -> int:
-    resolved = get_pricing_for_model(model)
+    cost_usd = _calculate_subscription_cost_usd(model, input_tokens, output_tokens, cached_input_tokens, service_tier)
+    return int(cost_usd * 1_000_000) if cost_usd is not None else 0
+
+
+def _calculate_subscription_cost_usd(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cached_input_tokens: int,
+    service_tier: str | None,
+) -> float | None:
+    resolved = get_subscription_pricing(model)
     if resolved is None:
-        return 0
+        return None
     _, price = resolved
     usage = UsageTokens(
         input_tokens=float(input_tokens),
         output_tokens=float(output_tokens),
         cached_input_tokens=float(cached_input_tokens),
     )
-    cost_usd = calculate_cost_from_usage(usage, price, service_tier=service_tier)
-    if cost_usd is None:
-        return 0
-    return int(cost_usd * 1_000_000)
+    return calculate_cost_from_usage(usage, price, service_tier=service_tier)
 
 
 def _build_api_key_trends(

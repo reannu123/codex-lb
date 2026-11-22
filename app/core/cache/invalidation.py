@@ -237,39 +237,7 @@ class CacheInvalidationPoller:
     async def _bump_once(self, namespace: str) -> None:
         session = self._session_factory()
         try:
-            dialect = session.get_bind().dialect.name
-            if dialect == "postgresql":
-                stmt = (
-                    pg_insert(CacheInvalidation)
-                    .values(namespace=namespace, version=1)
-                    .on_conflict_do_update(
-                        index_elements=[CacheInvalidation.namespace],
-                        set_={"version": CacheInvalidation.version + 1},
-                    )
-                )
-                await session.execute(stmt)
-            elif dialect == "sqlite":
-                stmt = (
-                    sqlite_insert(CacheInvalidation)
-                    .values(namespace=namespace, version=1)
-                    .on_conflict_do_update(
-                        index_elements=[CacheInvalidation.namespace],
-                        set_={"version": CacheInvalidation.version + 1},
-                    )
-                )
-                await session.execute(stmt)
-            else:
-                existing = await session.scalar(
-                    select(CacheInvalidation).where(CacheInvalidation.namespace == namespace)
-                )
-                if existing is None:
-                    session.add(CacheInvalidation(namespace=namespace, version=1))
-                else:
-                    await session.execute(
-                        update(CacheInvalidation)
-                        .where(CacheInvalidation.namespace == namespace)
-                        .values(version=CacheInvalidation.version + 1)
-                    )
+            await bump_cache_invalidation_in_transaction(session, namespace)
             await session.commit()
         finally:
             await close_session(session)
@@ -392,6 +360,41 @@ class CacheInvalidationPoller:
             )
         else:
             logger.debug("cache_invalidation poll failed", exc_info=True)
+
+
+async def bump_cache_invalidation_in_transaction(session: AsyncSession, namespace: str) -> None:
+    """Record a cache change in the transaction that owns the data mutation."""
+    dialect = session.get_bind().dialect.name
+    if dialect == "postgresql":
+        stmt = (
+            pg_insert(CacheInvalidation)
+            .values(namespace=namespace, version=1)
+            .on_conflict_do_update(
+                index_elements=[CacheInvalidation.namespace],
+                set_={"version": CacheInvalidation.version + 1},
+            )
+        )
+        await session.execute(stmt)
+    elif dialect == "sqlite":
+        stmt = (
+            sqlite_insert(CacheInvalidation)
+            .values(namespace=namespace, version=1)
+            .on_conflict_do_update(
+                index_elements=[CacheInvalidation.namespace],
+                set_={"version": CacheInvalidation.version + 1},
+            )
+        )
+        await session.execute(stmt)
+    else:
+        existing = await session.scalar(select(CacheInvalidation).where(CacheInvalidation.namespace == namespace))
+        if existing is None:
+            session.add(CacheInvalidation(namespace=namespace, version=1))
+        else:
+            await session.execute(
+                update(CacheInvalidation)
+                .where(CacheInvalidation.namespace == namespace)
+                .values(version=CacheInvalidation.version + 1)
+            )
 
 
 _poller: CacheInvalidationPoller | None = None

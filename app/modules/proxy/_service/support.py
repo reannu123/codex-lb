@@ -32,6 +32,7 @@ from app.core.resilience.network_recovery import PROCESS_NETWORK_UNAVAILABLE_COD
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
+from app.core.usage.price_overrides import PricingView, current_pricing_view
 from app.core.utils.locks import fast_lock
 from app.core.utils.sse import sse_event_type_from_block
 from app.db.models import Account, StickySessionKind
@@ -1004,6 +1005,7 @@ class _WebSocketRequestState:
     api_key_reservation: ApiKeyUsageReservationData | None
     started_at: float
     responses_lite_model: str | None = None
+    pricing_view: PricingView = field(default_factory=current_pricing_view, repr=False)
     latency_first_token_ms: int | None = None
     ttft_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState] = field(
         default_factory=dict

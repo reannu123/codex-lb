@@ -191,3 +191,68 @@ async def test_watermark_equality_is_lifetime_inclusive_and_hourly_exclusive(db_
         boundary = await session.scalar(select(RequestLog).where(RequestLog.request_id == "boundary"))
         assert boundary is not None
         assert boundary.cost_usd == calculated_cost_from_log(boundary)
+
+
+async def test_interrupted_repair_resumes_once_after_restart_ignoring_local_override(db_setup, monkeypatch):
+    import app.modules.request_logs.cost_backfill as module
+    from app.core.usage.metadata_scheduler import MetadataRefreshScheduler
+    from app.core.usage.price_overrides import BaseRates, install_overrides
+
+    await seed()
+    async with SessionLocal() as session:
+        session.add(
+            RequestLog(
+                account_id="a",
+                api_key_id="k",
+                request_id="recorded-missing",
+                requested_at=BASE,
+                model="gpt-6-astra",
+                input_tokens=1000,
+                output_tokens=100,
+                status="success",
+                cost_status="missing_price",
+            )
+        )
+        await session.commit()
+    await fold()
+    original = module._mirror_cost
+    mirrored = 0
+
+    async def crash_mid_batch(*args):
+        nonlocal mirrored
+        await original(*args)
+        mirrored += 1
+        if mirrored == 2:
+            raise RuntimeError("process stopped mid-repair")
+
+    install_overrides({"gpt-6-astra": BaseRates(1000, 1000, 1000)})
+    try:
+        with monkeypatch.context() as interrupted:
+            interrupted.setattr(module, "_mirror_cost", crash_mid_batch)
+            with pytest.raises(RuntimeError, match="process stopped mid-repair"):
+                await MetadataRefreshScheduler()._backfill()
+        async with SessionLocal() as session:
+            assert await session.scalar(select(func.count()).where(RequestLog.cost_usd.is_not(None))) == 2
+            assert await session.scalar(select(AccountUsageRollup.total_cost_usd)) == 7.0
+        # A restarted process begins at cursor zero; NULL remains the idempotency marker.
+        restarted = MetadataRefreshScheduler()
+        assert await restarted._backfill()
+        assert restarted._cursor == 0
+        assert await MetadataRefreshScheduler()._backfill()
+    finally:
+        install_overrides({})
+
+    async with SessionLocal() as session:
+        logs = (await session.scalars(select(RequestLog).order_by(RequestLog.id))).all()
+        missing = next(log for log in logs if log.request_id == "recorded-missing")
+        assert (missing.cost_status, missing.cost_usd) == ("missing_price", None)
+        repaired = [log for log in logs if log.cost_usd is not None and log.request_id != "pruned"]
+        assert len(repaired) == 13
+        for log in repaired:
+            if log.cost_usd != 0.0:
+                # Upstream-only pricing: the local override never reaches repair.
+                assert log.cost_usd == calculated_cost_from_log(log)
+        api_key_rows = [log for log in repaired if log.request_kind not in ("warmup", "limit_warmup")]
+        assert await session.scalar(select(ApiKeyUsageRollup.total_cost_usd)) == pytest.approx(
+            7 + sum(log.cost_usd or 0.0 for log in api_key_rows if log.requested_at < NOW)
+        )

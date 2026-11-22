@@ -1,12 +1,8 @@
 from __future__ import annotations
 
-from typing import cast as typing_cast
-
 from app.core.usage.logs import (
     CANCELLED_STATUS,
-    RequestLogLike,
     cached_input_tokens_from_log,
-    cost_breakdown_from_log,
     output_tokens_from_log,
     total_tokens_from_log,
 )
@@ -40,8 +36,12 @@ def to_request_log_entry(
     include_sensitive_metadata: bool,
     include_api_key_identity: bool = True,
 ) -> RequestLogEntry:
-    log_like = typing_cast(RequestLogLike, log)
-    cost_breakdown = cost_breakdown_from_log(log_like, precision=6)
+    cost_breakdown = RequestLogCostBreakdown(
+        input_usd=log.cost_input_usd,
+        cached_input_usd=log.cost_cached_input_usd,
+        output_usd=log.cost_output_usd,
+        total_usd=log.cost_usd,
+    )
     return RequestLogEntry(
         sticky_key_source=log.sticky_key_source if include_sensitive_metadata else None,
         sticky_kind=log.sticky_kind if include_sensitive_metadata else None,
@@ -83,14 +83,15 @@ def to_request_log_entry(
         upstream_status_code=log.upstream_status_code,
         upstream_error_code=log.upstream_error_code,
         bridge_stage=log.bridge_stage,
-        tokens=total_tokens_from_log(log_like),
+        tokens=total_tokens_from_log(log),
         input_tokens=log.input_tokens,
-        output_tokens=output_tokens_from_log(log_like),
+        output_tokens=output_tokens_from_log(log),
         output_tokens_raw=log.output_tokens,
         reasoning_tokens=log.reasoning_tokens,
-        cached_input_tokens=cached_input_tokens_from_log(log_like),
-        cost_usd=cost_breakdown.total_usd,
-        cost_breakdown=RequestLogCostBreakdown(**cost_breakdown.__dict__),
+        cached_input_tokens=cached_input_tokens_from_log(log),
+        cost_usd=log.cost_usd,
+        cost_status=log.cost_status,
+        cost_breakdown=cost_breakdown,
         latency_ms=log.latency_ms,
         latency_first_token_ms=log.latency_first_token_ms,
         latency_queue_ms=log.latency_queue_ms,

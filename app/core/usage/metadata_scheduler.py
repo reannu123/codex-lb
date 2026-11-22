@@ -48,9 +48,17 @@ class MetadataRefreshScheduler:
             cached = json.loads(await asyncio.to_thread(path.read_text))
             bundled = json.loads(BUNDLE_PATH.read_text())
             prices = decode_snapshot(cached)
-            if snapshot_updated_at(cached) < snapshot_updated_at(bundled):
-                prices = merge_catalogs(decode_snapshot(bundled), prices)
-            install_prices(prices)
+            cached_at = snapshot_updated_at(cached)
+            bundled_at = snapshot_updated_at(bundled)
+            bundled_prices = decode_snapshot(bundled) if cached_at < bundled_at else None
+            if bundled_prices is None:
+                install_prices(prices, source="last_good_cache")
+            else:
+                install_prices(
+                    merge_catalogs(bundled_prices, prices),
+                    source="last_good_cache",
+                    source_by_model=dict.fromkeys(bundled_prices, "bundled_snapshot"),
+                )
         except (OSError, ValueError):
             get_active_prices()
         await get_codex_version_cache().restore(get_settings().data_dir / "codex-version-cache.json")

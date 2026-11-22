@@ -4323,3 +4323,40 @@ async def test_direct_source_routing_forwards_only_constructed_headers(async_cli
     assert_source_saw_only_constructed_headers(seen_headers[0], source_token="token-header-proof")
     assert "client_metadata" not in seen_bodies[0]
     assert "stream_options" not in seen_bodies[0]
+
+
+@pytest.mark.asyncio
+async def test_source_audio_keeps_source_pricing_under_same_id_override(async_client, source_upstream) -> None:
+    from app.core.usage.price_overrides import BaseRates, install_overrides
+
+    await _enable_api_key_auth(async_client)
+
+    async def transcribe(_request: web.Request) -> web.Response:
+        usage = {"prompt_tokens": 37, "completion_tokens": 0, "total_tokens": 37}
+        return web.json_response({"text": "priced by source", "usage": usage})
+
+    model = "same-id-audio"
+    source_id = await _create_model_source(
+        async_client,
+        name=model,
+        model=model,
+        base_url=await source_upstream(transcribe),
+        input_per_1m=3.0,
+        supports_audio_transcriptions=True,
+    )
+    created = await async_client.post("/api/api-keys/", json={"name": model, "assignedSourceIds": [source_id]})
+    assert created.status_code == 200
+    install_overrides({model: BaseRates(1000, 1000, 1000)})
+    try:
+        response = await async_client.post(
+            "/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {created.json()['key']}"},
+            files=[("model", (None, model)), ("file", ("sample.wav", b"\x01\x02\x03", "audio/wav"))],
+        )
+    finally:
+        install_overrides({})
+    assert response.status_code == 200, response.text
+    async with SessionLocal() as session:
+        log = (await session.execute(select(RequestLog).where(RequestLog.model_source_id == source_id))).scalar_one()
+    assert (log.source, log.status, log.input_tokens) == ("model_source", "success", 37)
+    assert log.cost_usd == pytest.approx(37 * 3 / 1_000_000)

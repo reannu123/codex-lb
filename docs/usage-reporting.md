@@ -25,11 +25,21 @@ Reasoning usage may be missing when the upstream terminal event does not include
 
 codex-lb refreshes OpenAI text-token pricing hourly from models.dev. Compatible LiteLLM data supplies missing tier rates and additional models. Price lookups use the in-memory catalog; an upstream outage falls back to the last successful disk cache and bundled pricing snapshot. These amounts use API-equivalent token prices, not ChatGPT subscription credit multipliers.
 
-When a model's price becomes available, retained subscription requests with missing costs are repaired automatically in small batches. Their dashboard, report, account, and API-key usage aggregates are corrected in the same transaction. Existing costs, including zero, and API-key limit counters are preserved. Requests whose raw logs have already been deleted by retention cannot be reconstructed.
+New subscription requests record their cost outcome when they finish: a priced estimate (including an exact zero), a missing price, or unavailable usage. The request table shows **Missing price**, **Usage unavailable**, or **Cost unavailable** (older rows without a recorded reason) instead of a blank cost, shows a true zero as `$0.00`, and shows a positive cost below one cent as `< $0.01`. A recorded missing-price outcome stays missing even if a price appears later.
+
+Older requests stored before cost outcomes were recorded can still be repaired: when upstream pricing for the model becomes available, those retained rows with missing costs are filled automatically in small batches, using upstream prices only. Their dashboard, report, account, and API-key usage aggregates are corrected in the same transaction. Existing costs, including zero, and API-key limit counters are preserved. Requests whose raw logs have already been deleted by retention cannot be reconstructed.
 
 The Codex client-version fallback is also retained across restarts. Bundled prices and the stable Codex version are maintained by a daily update workflow that opens a reviewable PR. Operators do not need an extra API key or configuration setting.
 
 *Spec: [upstream-metadata](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/upstream-metadata)*
+
+## Model prices
+
+**Settings → Model prices** shows the effective standard input, cached-input, and output rates in USD per million tokens for each known subscription model, and where they come from: local override, live catalog, last-good catalog, bundled snapshot, built-in price, or missing. Dashboard writers can save a local override for one exact model ID; all three base rates are required, zero is allowed, and up to six decimal places are accepted. An override for a canonical ID does not reprice dated or aliased IDs. Catalog Priority, Flex, and long-context rates still take precedence where the catalog defines them.
+
+Overrides are stored in the database, survive catalog refreshes and restarts, and apply only to requests admitted after the save, for both cost estimates and API-key cost limits. A request already in flight keeps the price it started with. **Clear override** returns the model to the current catalog price, which may be missing. Saving or clearing an override never rewrites recorded request costs, aggregates, or settled limits.
+
+*Spec: [model-price-settings](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/model-price-settings)*
 
 ---
 

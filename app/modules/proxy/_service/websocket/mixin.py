@@ -92,6 +92,7 @@ from app.core.resilience.network_recovery import (
 from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.types import JsonValue
 from app.core.upstream_proxy import UpstreamProxyRouteError
+from app.core.usage.price_overrides import bind_pricing_view, reset_pricing_view
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
 from app.core.utils.sse import format_sse_event
@@ -3344,29 +3345,33 @@ class _WebSocketMixin:
                 client_metadata=client_metadata,
             ),
         )
-        reservation = await proxy._reserve_websocket_api_key_usage(
-            refreshed_api_key,
-            request_model=responses_payload.model,
-            request_service_tier=_facade()._normalize_service_tier_value(
-                dict(responses_payload.to_payload()).get("service_tier")
-            ),
-            request_usage_budget=estimate_api_key_request_usage(responses_payload),
-        )
+        pricing_token = bind_pricing_view()
         try:
-            request_state, text_data = proxy._prepare_response_bridge_request_state(
-                responses_payload,
-                api_key=refreshed_api_key,
-                api_key_reservation=reservation,
-                include_type_field=True,
-                attach_event_queue=False,
-                transport=_REQUEST_TRANSPORT_WEBSOCKET,
-                client_metadata=client_metadata,
-                headers=headers,
-                session_id=session_id,
+            reservation = await proxy._reserve_websocket_api_key_usage(
+                refreshed_api_key,
+                request_model=responses_payload.model,
+                request_service_tier=_facade()._normalize_service_tier_value(
+                    dict(responses_payload.to_payload()).get("service_tier")
+                ),
+                request_usage_budget=estimate_api_key_request_usage(responses_payload),
             )
-        except ProxyResponseError:
-            await proxy._release_websocket_reservation(reservation)
-            raise
+            try:
+                request_state, text_data = proxy._prepare_response_bridge_request_state(
+                    responses_payload,
+                    api_key=refreshed_api_key,
+                    api_key_reservation=reservation,
+                    include_type_field=True,
+                    attach_event_queue=False,
+                    transport=_REQUEST_TRANSPORT_WEBSOCKET,
+                    client_metadata=client_metadata,
+                    headers=headers,
+                    session_id=session_id,
+                )
+            except ProxyResponseError:
+                await proxy._release_websocket_reservation(reservation)
+                raise
+        finally:
+            reset_pricing_view(pricing_token)
         request_state.useragent = useragent
         request_state.useragent_group = useragent_group
         request_state.conversation_id = conversation_id
@@ -6369,6 +6374,37 @@ class _WebSocketMixin:
         )
 
     async def _finalize_websocket_request_state(
+        self,
+        request_state: _WebSocketRequestState,
+        *,
+        account: Account,
+        account_id_value: str,
+        event: OpenAIEvent | None,
+        event_type: str | None,
+        payload: dict[str, JsonValue] | None,
+        api_key: ApiKeyData | None,
+        upstream_control: _WebSocketUpstreamControl,
+        response_create_gate: asyncio.Semaphore,
+        isolate_account_health_failure: bool = False,
+    ) -> None:
+        pricing_token = bind_pricing_view(request_state.pricing_view)
+        try:
+            await self._finalize_websocket_request_with_pricing(
+                request_state,
+                account=account,
+                account_id_value=account_id_value,
+                event=event,
+                event_type=event_type,
+                payload=payload,
+                api_key=api_key,
+                upstream_control=upstream_control,
+                response_create_gate=response_create_gate,
+                isolate_account_health_failure=isolate_account_health_failure,
+            )
+        finally:
+            reset_pricing_view(pricing_token)
+
+    async def _finalize_websocket_request_with_pricing(
         self,
         request_state: _WebSocketRequestState,
         *,

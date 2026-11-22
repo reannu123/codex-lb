@@ -1432,3 +1432,39 @@ def test_direct_routing_claims_only_inside_the_source_route_helper() -> None:
     assert claim_sites, "the source route no longer claims through the bulkhead"
     assert set(claim_sites) == {"_source_responses_response"}
     assert "context: ProxyContext | None = None" in inspect.getsource(proxy_api._source_responses_response)
+
+
+@pytest.mark.asyncio
+async def test_same_id_source_model_keeps_source_pricing_under_local_override(async_client, source_upstream) -> None:
+    from app.core.usage.price_overrides import BaseRates, install_overrides
+
+    await _enable_api_key_auth(async_client)
+    state = _StubState()
+    base_url = await source_upstream(_sse_handler(state, before_hold=[_created(), _completed(_USAGE)]))
+    model = "gpt-6.2-sol"
+    source_id = await _create_model_source(
+        async_client,
+        name="same-id-source",
+        model=model,
+        base_url=base_url,
+        supports_responses=True,
+        input_per_1m=3.0,
+        output_per_1m=6.0,
+    )
+    key, key_id = await _create_limited_key(async_client, source_id, name="same-id-source-key")
+    # A subscription override on the same exact ID must not reach source-routed traffic.
+    install_overrides({model: BaseRates(1000, 1000, 1000)})
+    try:
+        response = await async_client.post(
+            "/v1/responses", headers={"authorization": f"Bearer {key}"}, json=_request_body(model)
+        )
+        assert response.status_code == 200, response.text
+        await _drain(async_client)
+    finally:
+        install_overrides({})
+
+    assert len(state.requests) == 1
+    reservations = await _reservations(key_id)
+    assert [(reservation.status, reservation.cost_microdollars) for reservation in reservations] == [("finalized", 420)]
+    (row,) = await _source_rows(source_id)
+    assert row.cost_usd == pytest.approx(0.00042)

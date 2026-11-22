@@ -19,7 +19,7 @@ from app.core.usage.logs import (
     CLIENT_DISCONNECT_ERROR_CODE,
     NON_ERROR_STATUSES,
     RequestLogLike,
-    calculated_cost_from_log,
+    subscription_cost_from_log,
 )
 from app.core.usage.types import (
     BucketConversationAggregate,
@@ -218,6 +218,15 @@ class ConversationDetailsResult:
     total_elapsed_ms: int
     useragent_group: str | None
     model_stats: list[ConversationModelStatRow]
+
+
+def _record_subscription_cost(log: RequestLog) -> None:
+    status, cost = subscription_cost_from_log(typing_cast(RequestLogLike, log))
+    log.cost_status = status
+    log.cost_usd = cost.total_usd if cost else None
+    log.cost_input_usd = cost.input_usd if cost else None
+    log.cost_cached_input_usd = cost.cached_input_usd if cost else None
+    log.cost_output_usd = cost.output_usd if cost else None
 
 
 class RequestLogsRepository:
@@ -1117,13 +1126,10 @@ class RequestLogsRepository:
                 upstream_proxy_fail_closed_reason=upstream_proxy_fail_closed_reason,
                 requested_at=requested_at or utcnow(),
             )
-            log.cost_usd = (
-                cost_usd
-                if cost_usd is not None
-                else 0.0
-                if model_source_id is not None
-                else calculated_cost_from_log(typing_cast(RequestLogLike, log))
-            )
+            if cost_usd is not None or model_source_id is not None:
+                log.cost_usd = cost_usd if cost_usd is not None else 0.0
+            elif model_source_kind in (None, "subscription"):
+                _record_subscription_cost(log)
             # Core insert instead of unit-of-work: the row is fully built
             # above, so the ORM flush (relationship cascade scan,
             # per-attribute history snapshots) is pure overhead on every
@@ -1240,7 +1246,7 @@ class RequestLogsRepository:
                     return 0
                 for log in logs:
                     log.model = model
-                    log.cost_usd = calculated_cost_from_log(typing_cast(RequestLogLike, log))
+                    _record_subscription_cost(log)
                 await self._session.commit()
             except sa_exc.ResourceClosedError:
                 return 0

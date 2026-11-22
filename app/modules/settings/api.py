@@ -61,6 +61,14 @@ from app.modules.proxy.account_cache import (
     get_account_selection_cache,
     propagate_account_routing_change,
 )
+from app.modules.settings.model_prices import (
+    ModelPricesResponse,
+    ModelPricesService,
+    ModelPriceUpdate,
+    normalize_price_model_id,
+)
+from app.modules.settings.model_prices_cache import refresh_model_price_overrides
+from app.modules.settings.model_prices_repository import ModelPricesRepository
 from app.modules.settings.repository import ModelContextWindowOverridesRepository
 from app.modules.settings.schemas import (
     SECURITY_SETTINGS_FIELDS,
@@ -826,6 +834,52 @@ async def delete_model_context_window_override(
         details={"changed_fields": ["model_context_window_overrides"], "slug": normalized},
     )
     return await _model_context_window_overrides_response(context)
+
+
+@router.get("/model-prices", response_model=ModelPricesResponse)
+async def get_model_prices(context: SettingsContext = Depends(get_settings_context)) -> ModelPricesResponse:
+    return await ModelPricesService(ModelPricesRepository(context.session)).list_prices()
+
+
+@router.put("/model-prices/{model_id:path}", response_model=ModelPricesResponse)
+async def put_model_price(
+    request: Request,
+    model_id: str,
+    payload: ModelPriceUpdate,
+    principal: DashboardPrincipal = Depends(require_dashboard_write_access),
+    context: SettingsContext = Depends(get_settings_context),
+) -> ModelPricesResponse:
+    model_id = normalize_price_model_id(model_id)
+    service = ModelPricesService(ModelPricesRepository(context.session))
+    await service.save(model_id, payload.base_rates())
+    await refresh_model_price_overrides()
+    _audit_model_price_change(request, principal, model_id, "save")
+    return await service.list_prices()
+
+
+@router.delete("/model-prices/{model_id:path}", response_model=ModelPricesResponse)
+async def delete_model_price(
+    request: Request,
+    model_id: str,
+    principal: DashboardPrincipal = Depends(require_dashboard_write_access),
+    context: SettingsContext = Depends(get_settings_context),
+) -> ModelPricesResponse:
+    model_id = normalize_price_model_id(model_id)
+    repository = ModelPricesRepository(context.session)
+    if await repository.delete(model_id):
+        await refresh_model_price_overrides()
+        _audit_model_price_change(request, principal, model_id, "clear")
+    return await ModelPricesService(repository).list_prices()
+
+
+def _audit_model_price_change(request: Request, principal: DashboardPrincipal, model_id: str, action: str) -> None:
+    AuditService.log_async(
+        "settings_changed",
+        actor_ip=request.client.host if request.client else None,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("model_price", model_id),
+        details={"action": action, "changed_fields": ["model_prices"]},
+    )
 
 
 # end M4 model catalogue

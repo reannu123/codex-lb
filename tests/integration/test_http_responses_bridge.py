@@ -28,6 +28,8 @@ from app.core.clients.proxy_websocket import UpstreamWebSocketMessage as _FakeUp
 from app.core.config.dashboard_overrides import with_dashboard_overrides
 from app.core.config.settings import Settings
 from app.core.openai.model_registry import ModelRegistry
+from app.core.usage.price_overrides import PricingView, bind_pricing_view, reset_pricing_view
+from app.core.usage.pricing import ModelPrice
 from app.core.utils.request_id import (
     reset_request_id,
     reset_request_scope_id,
@@ -38,6 +40,8 @@ from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import (
     Account,
     AccountStatus,
+    ApiKeyLimit,
+    ApiKeyUsageReservation,
     DashboardSettings,
     HttpBridgeSessionRecord,
     HttpBridgeSessionState,
@@ -46,6 +50,8 @@ from app.db.models import (
 )
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
+from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.api_keys.service import ApiKeyRequestUsageBudget, ApiKeysService
 from app.modules.proxy._service import support as proxy_support
 from app.modules.proxy._service.http_bridge import helpers as http_bridge_helpers_module
 from app.modules.proxy._service.http_bridge import quarantine as http_bridge_quarantine_module
@@ -5464,6 +5470,205 @@ async def test_forwarded_priority_prompt_cache_mismatch_forks_on_canonical_owner
         assert creator_response_ids <= creator_session.previous_response_ids
     finally:
         service._ring_membership = original_ring
+
+
+@pytest.mark.asyncio
+async def test_forwarded_bridge_reuses_reader_with_each_turns_signed_price(async_client, app_instance, monkeypatch):
+    from app.modules.proxy import api as proxy_api
+    from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext, build_owner_forward_headers
+
+    settings = _make_app_settings(enabled=True)
+    _install_proxy_settings(monkeypatch, app_settings=settings, dashboard_settings=_make_dashboard_settings())
+    monkeypatch.setattr(proxy_api, "get_settings", lambda: settings)
+    assert (await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})).status_code == 200
+    created = await async_client.post(
+        "/api/api-keys",
+        json={
+            "name": "forwarded-price-limit",
+            "limits": [{"limitType": "cost_usd", "limitWindow": "daily", "maxValue": 1_000_000}],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()
+    await _import_account(async_client, "acc_forwarded_price", "forwarded-price@example.com")
+    upstream = _FakeBridgeUpstreamWebSocket("resp_forwarded_price")
+    connections = 0
+
+    async def connect(*args, **kwargs):
+        nonlocal connections
+        connections += 1
+        return upstream
+
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    service = get_proxy_service_for_app(app_instance)
+    persist = service._persist_request_log
+    persist_entered, resume_persist = asyncio.Event(), asyncio.Event()
+
+    async def persist_after_response(**kwargs):
+        if kwargs["request_id"] == "resp_forwarded_price_2":
+            persist_entered.set()
+            await resume_persist.wait()
+        await persist(**kwargs)
+
+    monkeypatch.setattr(service, "_persist_request_log", persist_after_response)
+    model = "gpt-5.1"
+    session_key = "forwarded-price-session"
+    reservation_ids = []
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as owner_client:
+            for turn, price in enumerate((ModelPrice(2, 4, 0.5), ModelPrice(6, 10, 2)), start=1):
+                token = bind_pricing_view(PricingView({model: price}, {}))
+                try:
+                    async with SessionLocal() as session:
+                        reservation = await ApiKeysService(ApiKeysRepository(session)).enforce_limits_for_request(
+                            key["id"], request_model=model, request_usage_budget=ApiKeyRequestUsageBudget(24, 2)
+                        )
+                finally:
+                    reset_pricing_view(token)
+                assert reservation is not None
+                reservation_ids.append(reservation.reservation_id)
+                payload = proxy_module.ResponsesRequest(
+                    model=model,
+                    instructions="Return exactly OK.",
+                    input=f"Turn {turn}",
+                    previous_response_id=None if turn == 1 else "resp_forwarded_price_1",
+                )
+                headers = build_owner_forward_headers(
+                    headers={"authorization": f"Bearer {key['key']}", "session_id": session_key},
+                    payload=payload,
+                    context=HTTPBridgeForwardContext(
+                        origin_instance="instance-b",
+                        target_instance="instance-a",
+                        reservation=reservation,
+                        codex_session_affinity=True,
+                        downstream_turn_state=None,
+                        original_request_unanchored=turn == 1,
+                        original_affinity_kind="session_header",
+                        original_affinity_key=session_key,
+                        price_quote=(model, price),
+                    ),
+                )
+                response = await asyncio.wait_for(
+                    owner_client.post(
+                        "/internal/bridge/responses", json=payload.model_dump_for_forwarding(), headers=headers
+                    ),
+                    timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+                )
+                assert response.status_code == 200, response.text
+                assert '"type":"response.completed"' in response.text
+        assert connections == 1
+        assert len(upstream.sent_text) == 2
+        await _wait_for_event(persist_entered)
+        async with SessionLocal() as session:
+            assert (
+                await session.scalar(select(RequestLog.id).where(RequestLog.request_id == "resp_forwarded_price_2"))
+                is None
+            )
+    finally:
+        resume_persist.set()
+        await service.drain_persistence_tasks(timeout_seconds=_TEST_SYNC_TIMEOUT_SECONDS)
+
+    async with SessionLocal() as session:
+        for turn, reservation_id, hold, components in zip(
+            (1, 2), reservation_ids, (56, 164), ((8, 10, 8), (24, 40, 20)), strict=True
+        ):
+            reservation = await session.get(ApiKeyUsageReservation, reservation_id)
+            assert reservation is not None
+            assert reservation.status == "finalized"
+            assert reservation.cost_microdollars == sum(components)
+            assert reservation.items[0].reserved_delta == hold
+            assert reservation.items[0].actual_delta == sum(components)
+            logs = await session.scalars(
+                select(RequestLog).where(RequestLog.request_id == f"resp_forwarded_price_{turn}")
+            )
+            log = logs.one()
+            assert log.cost_status == "priced"
+            assert log.cost_usd == pytest.approx(sum(components) / 1_000_000)
+            assert (log.cost_input_usd, log.cost_cached_input_usd, log.cost_output_usd) == pytest.approx(
+                tuple(component / 1_000_000 for component in components)
+            )
+        assert await session.scalar(select(ApiKeyLimit.current_value).where(ApiKeyLimit.api_key_id == key["id"])) == 110
+
+
+@pytest.mark.asyncio
+async def test_rejected_owner_forward_recovers_locally_with_admission_price(async_client, app_instance, monkeypatch):
+    from app.core.usage.price_overrides import BaseRates, get_subscription_pricing, install_overrides
+    from app.modules.proxy._service.http_bridge import owner_forwarding as owner_forwarding_module
+
+    _install_bridge_settings_with_limits(
+        monkeypatch, enabled=True, instance_id="instance-b", instance_ring=["instance-a", "instance-b"]
+    )
+    await _import_account(async_client, "acc_forward_retry_price", "forward-retry-price@example.com")
+    service = get_proxy_service_for_app(app_instance)
+    model = "gpt-5.1"
+    index = 0
+    while (
+        await proxy_module._http_bridge_owner_instance(
+            proxy_module._HTTPBridgeSessionKey("session_header", f"forward-retry-price-{index}", None),
+            proxy_module.get_settings(),
+        )
+        != "instance-a"
+    ):
+        index += 1
+    session_id = f"forward-retry-price-{index}"
+
+    class Ring:
+        async def list_active(self, *, require_endpoint: bool = False) -> list[str]:
+            return ["instance-a", "instance-b"]
+
+        async def resolve_endpoint(self, instance_id: str) -> str:
+            return f"http://{instance_id}"
+
+    admission, saved_mid_request = BaseRates(2, 0.5, 4), BaseRates(60, 60, 60)
+    quotes: list[object] = []
+
+    async def reject_after_peer_save(*, payload, **_kwargs: Any) -> AsyncGenerator[str, None]:
+        # The origin quotes before dispatch; a peer save then lands before the
+        # owner rejects, so the local retry must keep the admission view.
+        quote = get_subscription_pricing(payload.model)
+        quotes.append(BaseRates.from_price(quote[1]) if quote is not None else None)
+        install_overrides({model: saved_mid_request})
+        raise owner_forwarding_module._OwnerForwardRequestError(
+            proxy_module.ProxyResponseError(
+                503,
+                proxy_module.openai_error("bridge_owner_unreachable", "owner rejected", error_type="server_error"),
+            ),
+            outcome=owner_forwarding_module._OwnerForwardOutcome.RECEIVER_REJECTED,
+        )
+        yield ""
+
+    async def connect(*args: Any, **kwargs: Any) -> _FakeBridgeUpstreamWebSocket:
+        return _FakeBridgeUpstreamWebSocket("resp_forward_retry_price")
+
+    original_ring = service._ring_membership
+    service._ring_membership = cast(Any, Ring())
+    monkeypatch.setattr(service, "_forward_http_bridge_request_to_owner", reject_after_peer_save)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", connect)
+    install_overrides({model: admission})
+    try:
+        events = await _collect_sse_events(
+            async_client,
+            "/backend-api/codex/responses",
+            json_body={"model": model, "instructions": "Return exactly OK.", "input": "retry", "stream": True},
+            headers={"session_id": session_id},
+        )
+        current = get_subscription_pricing(model)
+        assert current is not None and BaseRates.from_price(current[1]) == saved_mid_request
+        await service.drain_persistence_tasks(timeout_seconds=_TEST_SYNC_TIMEOUT_SECONDS)
+    finally:
+        service._ring_membership = original_ring
+        install_overrides({})
+
+    assert events[-1]["type"] == "response.completed", events
+    assert quotes == [admission]
+    async with SessionLocal() as session:
+        log = (
+            await session.scalars(select(RequestLog).where(RequestLog.request_id == "resp_forward_retry_price_1"))
+        ).one()
+    # 4 uncached input at 2, 20 cached at 0.5, and 2 output at 4 (microdollars).
+    assert log.cost_status == "priced"
+    assert (log.cost_input_usd, log.cost_cached_input_usd, log.cost_output_usd) == pytest.approx((8e-6, 10e-6, 8e-6))
+    assert log.cost_usd == pytest.approx(26e-6)
 
 
 @pytest.mark.asyncio

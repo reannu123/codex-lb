@@ -42,6 +42,7 @@ from app.core.metrics.prometheus import (
 from app.core.openai.requests import (
     ResponsesRequest,
 )
+from app.core.usage.price_overrides import get_subscription_pricing
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.modules.api_keys.service import (
@@ -414,6 +415,7 @@ class _HTTPBridgeOwnerForwardingMixin:
         # file_owner_account_id is an origin-side ownership proof, not a route
         # hint. The forwarding signer binds it before another replica may skip
         # its own process-local file-pin lookup.
+        pricing = get_subscription_pricing(payload.model)
         forward_context = HTTPBridgeForwardContext(
             origin_instance=current_instance,
             target_instance=owner_forward.owner_instance,
@@ -433,6 +435,7 @@ class _HTTPBridgeOwnerForwardingMixin:
             original_affinity_key=owner_forward.key.affinity_key,
             file_owner_account_id=file_owner_account_id,
             client_ip=client_ip,
+            price_quote=(payload.model.lower(), pricing[1] if pricing is not None else None),
         )
         forward_headers = _headers_with_authorization(headers, proxy_api_authorization)
         clock = clock_for(self)

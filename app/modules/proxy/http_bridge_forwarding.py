@@ -5,7 +5,7 @@ import hashlib
 import hmac
 import json
 from collections.abc import AsyncIterator, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import cast
 
 import aiohttp
@@ -18,6 +18,8 @@ from app.core.crypto import get_or_create_key
 from app.core.errors import OpenAIErrorEnvelope, openai_error, response_failed_event
 from app.core.openai.requests import ResponsesRequest, extract_input_file_ids
 from app.core.types import JsonObject
+from app.core.usage.pricing import ModelPrice
+from app.core.usage.pricing_catalog import decode_model_price
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
 from app.core.utils.sse import format_sse_event
@@ -73,6 +75,8 @@ HTTP_BRIDGE_SIGNATURE_HEADER = "x-codex-bridge-signature"
 # signature; see the ROLLOUT SHIM notes in ``build_owner_forward_headers`` and
 # ``parse_forwarded_request``.
 HTTP_BRIDGE_SIGNATURE_V2_HEADER = "x-codex-bridge-signature-v2"
+HTTP_BRIDGE_PRICE_HEADER = "x-codex-bridge-price"
+HTTP_BRIDGE_PRICE_SIGNATURE_HEADER = "x-codex-bridge-price-signature"
 _HTTP_BRIDGE_SIGNATURE_VERSION_V2 = "2"
 # Response header (owner -> origin) carrying ``ProxyResponseError``
 # provenance back across the forward hop. The owner's error body is an
@@ -98,6 +102,7 @@ class HTTPBridgeForwardContext:
     client_ip: str | None = None
     reservation: ApiKeyUsageReservationData | None = None
     signature_version: str | None = None
+    price_quote: tuple[str, ModelPrice | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,7 +381,20 @@ def build_owner_forward_headers(
         context=context,
         signature_version=signature_version,
     )
+    if context.price_quote is not None:
+        model, price = context.price_quote
+        if model != payload.model.lower():
+            raise ValueError("Forwarded pricing model differs from request model")
+        quote = json.dumps(asdict(price) if price is not None else None, separators=(",", ":"), allow_nan=False)
+        forwarded[HTTP_BRIDGE_PRICE_HEADER] = quote
+        forwarded[HTTP_BRIDGE_PRICE_SIGNATURE_HEADER] = _sign_price_quote(
+            forwarded[HTTP_BRIDGE_SIGNATURE_V2_HEADER], quote
+        )
     return forwarded
+
+
+def _sign_price_quote(forward_signature: str, quote: str) -> str:
+    return _sign_bridge_payload(json.dumps(["codex-lb-http-bridge-price", forward_signature, quote]))
 
 
 def parse_forwarded_request(
@@ -447,6 +465,24 @@ def parse_forwarded_request(
             signature_version=signature_version,
         ),
     )
+    price_quote = headers.get(HTTP_BRIDGE_PRICE_HEADER)
+    price_signature = headers.get(HTTP_BRIDGE_PRICE_SIGNATURE_HEADER)
+    if price_quote is not None or price_signature is not None:
+        if (
+            not tools_bound_valid
+            or tools_bound_signature is None
+            or price_quote is None
+            or len(price_quote) > 2048
+            or price_signature is None
+            or not hmac.compare_digest(price_signature, _sign_price_quote(tools_bound_signature, price_quote))
+        ):
+            return None, _invalid_bridge_forward_signature_error()
+        try:
+            raw = json.loads(price_quote)
+            price = None if raw is None else decode_model_price(raw)
+        except (ValueError, OverflowError):
+            return None, _invalid_bridge_forward_signature_error()
+        context = replace(context, price_quote=(payload.model.lower(), price))
     if tools_bound_valid:
         return HTTPBridgeForwardedRequest(context=context), None
     if context.file_owner_account_id is not None or extract_input_file_ids(payload.input):

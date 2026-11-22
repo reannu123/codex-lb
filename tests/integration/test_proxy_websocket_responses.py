@@ -14805,3 +14805,206 @@ def test_backend_responses_websocket_re_sends_an_anchored_accepted_failure_in_a_
     assert "previous_response_id" not in replayed_payload
     assert replayed_payload["input"] == [failover.HISTORICAL_INPUT, failover.FOLLOW_UP_INPUT]
     assert other_account_upstream.sent_text == []
+
+
+def test_v1_responses_websocket_pins_price_view_per_turn(app_instance, monkeypatch):
+    from app.core.usage.price_overrides import BaseRates, get_subscription_pricing, install_overrides
+
+    model = "gpt-6.2-sol"
+    admission, committed = BaseRates(2, 0, 8), BaseRates(5, 1, 20)
+    release_first = threading.Event()
+
+    def frame(event_type: str, response_id: str, **response: object) -> _FakeUpstreamMessage:
+        body = {"id": response_id, "status": "completed" if event_type == "response.completed" else "in_progress"}
+        return _FakeUpstreamMessage("text", text=json.dumps({"type": event_type, "response": {**body, **response}}))
+
+    usage = {"input_tokens": 1000, "output_tokens": 100, "total_tokens": 1100}
+
+    class _GatedUpstream(_FakeUpstreamWebSocket):
+        async def send_text(self, text: str) -> None:
+            await super().send_text(text)
+            if len(self.sent_text) == 2:
+                self._messages.put_nowait(frame("response.created", "resp_ws_price_second"))
+                self._messages.put_nowait(frame("response.completed", "resp_ws_price_second", usage=usage))
+
+        async def receive(self) -> _FakeUpstreamMessage:
+            message = await super().receive()
+            if message.text and "resp_ws_price_first" in message.text and "response.completed" in message.text:
+                while not release_first.is_set():
+                    await asyncio.sleep(0.01)
+            return message
+
+    upstream = _GatedUpstream(
+        [
+            frame("response.created", "resp_ws_price_first"),
+            frame("response.completed", "resp_ws_price_first", usage=usage),
+        ]
+    )
+    reserved: list[object] = []
+    logged: list[tuple[str, object]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        del self, headers, kwargs
+        return SimpleNamespace(id="acct_ws_price"), upstream
+
+    async def capture_reservation(self, api_key, **kwargs):
+        del self, api_key
+        reserved.append(get_subscription_pricing(kwargs["request_model"]))
+        return None
+
+    async def capture_request_log(self, **kwargs):
+        del self
+        logged.append((kwargs["request_id"], get_subscription_pricing(kwargs["model"])))
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_reserve_websocket_api_key_usage", capture_reservation)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", capture_request_log)
+
+    def turn(text: str) -> dict[str, object]:
+        return {"type": "response.create", "model": model, "input": text, "stream": True}
+
+    try:
+        with TestClient(app_instance) as client:
+            # Startup loads persisted overrides, so install after it runs.
+            install_overrides({model: admission})
+            with client.websocket_connect("/v1/responses") as websocket:
+                websocket.send_text(json.dumps(turn("first")))
+                assert json.loads(websocket.receive_text())["type"] == "response.created"
+                # A save commits while the first turn is still in flight.
+                install_overrides({model: committed})
+                release_first.set()
+                assert json.loads(websocket.receive_text())["type"] == "response.completed"
+                websocket.send_text(json.dumps(turn("second")))
+                assert [json.loads(websocket.receive_text())["type"] for _ in range(2)] == [
+                    "response.created",
+                    "response.completed",
+                ]
+                deadline = time.monotonic() + 5
+                while len(logged) < 2 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+    finally:
+        install_overrides({})
+
+    first_price = (model, admission.apply(None))
+    second_price = (model, committed.apply(None))
+    assert reserved == [first_price, second_price]
+    assert logged == [("resp_ws_price_first", first_price), ("resp_ws_price_second", second_price)]
+
+
+def test_backend_responses_websocket_retry_on_another_account_keeps_turn_price(app_instance, monkeypatch):
+    from app.core.usage.price_overrides import BaseRates, get_subscription_pricing, install_overrides
+
+    model = "gpt-5.6-sol"
+    admission, committed = BaseRates(2, 0, 8), BaseRates(5, 1, 20)
+
+    def text(payload: dict[str, object]) -> _FakeUpstreamMessage:
+        return _FakeUpstreamMessage("text", text=json.dumps(payload, separators=(",", ":")))
+
+    rejected = _FakeUpstreamWebSocket(
+        [
+            text(
+                {
+                    "type": "error",
+                    "status": 400,
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": "invalid_request_error",
+                        "message": f"The '{model}' model is not supported when using Codex with a ChatGPT account.",
+                    },
+                }
+            )
+        ]
+    )
+    usage = {"input_tokens": 1000, "output_tokens": 100, "total_tokens": 1100}
+    accepted = _FakeUpstreamWebSocket(
+        [
+            text({"type": "response.created", "response": {"id": "resp_ws_retry_price", "status": "in_progress"}}),
+            text(
+                {
+                    "type": "response.completed",
+                    "response": {"id": "resp_ws_retry_price", "status": "completed", "usage": usage},
+                }
+            ),
+        ]
+    )
+    upstreams = [
+        (SimpleNamespace(id="acct_ws_retry_rejected"), rejected),
+        (SimpleNamespace(id="acct_ws_retry"), accepted),
+    ]
+    reserved: list[object] = []
+    logged: list[tuple[str, object]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def connect(self, headers, **kwargs):
+        del self, headers, kwargs
+        if len(upstreams) == 1:
+            # A save commits while the turn is being retried on another account.
+            install_overrides({model: committed})
+        return upstreams.pop(0)
+
+    async def capture_reservation(self, api_key, **kwargs):
+        del self, api_key
+        reserved.append(get_subscription_pricing(kwargs["request_model"]))
+        return None
+
+    async def capture_request_log(self, **kwargs):
+        del self
+        logged.append((kwargs["request_id"], get_subscription_pricing(kwargs["model"])))
+
+    async def ignore_stream_error(self, account, error, code, **_kwargs):
+        del self, account, error, code
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", connect)
+    monkeypatch.setattr(proxy_module.ProxyService, "_reserve_websocket_api_key_usage", capture_reservation)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", capture_request_log)
+    monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", ignore_stream_error)
+
+    try:
+        with TestClient(app_instance) as client:
+            install_overrides({model: admission})
+            with client.websocket_connect("/backend-api/codex/responses") as websocket:
+                websocket.send_text(
+                    json.dumps({"type": "response.create", "model": model, "instructions": "", "input": "retry"})
+                )
+                assert [json.loads(websocket.receive_text())["type"] for _ in range(2)] == [
+                    "response.created",
+                    "response.completed",
+                ]
+                deadline = time.monotonic() + 5
+                while not logged and time.monotonic() < deadline:
+                    time.sleep(0.01)
+            current = get_subscription_pricing(model)
+    finally:
+        install_overrides({})
+
+    assert upstreams == [] and len(accepted.sent_text) == 1
+    assert current is not None and current[1] == committed.apply(current[1])
+    (reserved_price,) = reserved
+    assert isinstance(reserved_price, tuple) and reserved_price[0] == model
+    assert BaseRates.from_price(reserved_price[1]) == admission
+    assert logged == [("resp_ws_retry_price", reserved_price)]

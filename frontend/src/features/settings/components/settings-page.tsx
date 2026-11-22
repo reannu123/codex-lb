@@ -21,6 +21,7 @@ import { ConversationArchiveSettings } from "@/features/settings/components/conv
 import { DataRetentionSettings } from "@/features/settings/components/data-retention-settings";
 import { ImportSettings } from "@/features/settings/components/import-settings";
 import { ModelCatalogueSettings } from "@/features/settings/components/model-catalogue-settings";
+import { ModelPricesSettings } from "@/features/settings/components/model-prices-settings";
 import { ResetCreditSettings } from "@/features/settings/components/reset-credit-settings";
 import { ResilienceSettings } from "@/features/settings/components/resilience-settings";
 import { SessionBridgeSettings } from "@/features/settings/components/session-bridge-settings";
@@ -178,6 +179,7 @@ export function SettingsPage() {
 
           <div className="space-y-4">
             <AppearanceSettings />
+            <ModelPricesSettings canWrite={canWrite} />
             <ImportSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
             <ResetCreditSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
             {/* Guest access, password, session and TOTP live inside the Access

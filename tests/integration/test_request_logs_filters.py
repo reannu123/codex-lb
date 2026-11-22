@@ -680,11 +680,11 @@ async def test_request_logs_tokens_and_cost_use_reasoning_tokens(async_client, d
     assert entry["reasoningTokens"] == 400
     assert entry["cachedInputTokens"] == 100
     assert entry["reasoningEffort"] == "xhigh"
-    expected = round(_cost(1000, 400, 100), 6)
+    expected = _cost(1000, 400, 100)
     assert entry["costUsd"] == pytest.approx(expected)
-    assert entry["costBreakdown"]["inputUsd"] == pytest.approx(round((900 / 1_000_000) * 1.25, 6))
-    assert entry["costBreakdown"]["cachedInputUsd"] == pytest.approx(round((100 / 1_000_000) * 0.125, 6))
-    assert entry["costBreakdown"]["outputUsd"] == pytest.approx(round((400 / 1_000_000) * 10.0, 6))
+    assert entry["costBreakdown"]["inputUsd"] == pytest.approx((900 / 1_000_000) * 1.25)
+    assert entry["costBreakdown"]["cachedInputUsd"] == pytest.approx((100 / 1_000_000) * 0.125)
+    assert entry["costBreakdown"]["outputUsd"] == pytest.approx((400 / 1_000_000) * 10.0)
     assert entry["costBreakdown"]["totalUsd"] == pytest.approx(expected)
 
 
@@ -719,15 +719,15 @@ async def test_request_logs_partial_rows_keep_nullable_cost_breakdown_shape(asyn
     assert entry["outputTokens"] is None
     assert entry["costUsd"] is None
     assert entry["costBreakdown"] == {
-        "inputUsd": pytest.approx(round((900 / 1_000_000) * 1.25, 6)),
-        "cachedInputUsd": pytest.approx(round((100 / 1_000_000) * 0.125, 6)),
+        "inputUsd": pytest.approx((900 / 1_000_000) * 1.25),
+        "cachedInputUsd": pytest.approx((100 / 1_000_000) * 0.125),
         "outputUsd": None,
         "totalUsd": None,
     }
 
 
 @pytest.mark.asyncio
-async def test_request_logs_cost_uses_computed_total_when_persisted_cost_missing(async_client, db_setup):
+async def test_request_logs_cost_leaves_legacy_missing_total_unavailable(async_client, db_setup):
     now = utcnow()
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)
@@ -745,16 +745,20 @@ async def test_request_logs_cost_uses_computed_total_when_persisted_cost_missing
             error_code=None,
             requested_at=now,
         )
-        await session.execute(update(log.__class__).where(log.__class__.id == log.id).values(cost_usd=None))
+        await session.execute(
+            update(log.__class__)
+            .where(log.__class__.id == log.id)
+            .values(cost_usd=None, cost_status=None, cost_output_usd=None)
+        )
         await session.commit()
 
     response = await async_client.get("/api/request-logs?accountId=acc_missing_persisted_cost&limit=1")
     assert response.status_code == 200
     payload = response.json()["requests"]
     assert len(payload) == 1
-    expected = round(_cost(1000, 500), 6)
-    assert payload[0]["costUsd"] == pytest.approx(expected)
-    assert payload[0]["costBreakdown"]["totalUsd"] == pytest.approx(expected)
+    assert payload[0]["costUsd"] is None
+    assert payload[0]["costStatus"] is None
+    assert payload[0]["costBreakdown"]["totalUsd"] is None
 
 
 async def test_request_logs_cost_uses_priority_service_tier(async_client, db_setup):
@@ -839,7 +843,11 @@ async def test_request_logs_cost_uses_persisted_cost_field(async_client, db_setu
             error_code=None,
             requested_at=now,
         )
-        await session.execute(update(log.__class__).where(log.__class__.id == log.id).values(cost_usd=4.321234))
+        await session.execute(
+            update(log.__class__)
+            .where(log.__class__.id == log.id)
+            .values(cost_usd=4.321234, cost_status=None, cost_output_usd=None)
+        )
         await session.commit()
 
     response = await async_client.get("/api/request-logs?accountId=acc_persisted_log_cost&limit=1")

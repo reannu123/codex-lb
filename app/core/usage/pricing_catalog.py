@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import logging
 import math
+from collections.abc import Mapping
 from dataclasses import asdict, fields
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 import aiohttp
 
@@ -52,6 +54,10 @@ def _price(values: dict[str, float]) -> ModelPrice:
         if present and "long_context_" in prefix and values.get("long_context_threshold_tokens", 0) <= 0:
             raise ValueError("Missing context threshold")
     return ModelPrice(**values)
+
+
+def decode_model_price(raw: JsonValue) -> ModelPrice:
+    return _price(_rates(_object(raw), {key: key for key in _FIELDS}))
 
 
 def parse_models_dev(payload: JsonValue) -> dict[str, ModelPrice]:
@@ -173,10 +179,7 @@ def decode_snapshot(payload: JsonValue) -> dict[str, ModelPrice]:
     snapshot_updated_at(payload)
     if root.get("schema_version") != 1:
         raise ValueError("Unsupported pricing snapshot")
-    result = {
-        model: _price(_rates(_object(raw), {key: key for key in _FIELDS}))
-        for model, raw in _object(root.get("models")).items()
-    }
+    result = {model: decode_model_price(raw) for model, raw in _object(root.get("models")).items()}
     if not result:
         raise ValueError("Empty pricing snapshot")
     return result
@@ -226,16 +229,36 @@ async def fetch_catalogs() -> dict[str, ModelPrice]:
     return merge_catalogs(catalogs[0], catalogs[1])
 
 
+type CatalogPriceSource = Literal["live_catalog", "last_good_cache", "bundled_snapshot", "built_in"]
+
 _prices: dict[str, ModelPrice] | None = None
+_price_sources: dict[str, CatalogPriceSource] = {}
 
 
 def get_active_prices() -> dict[str, ModelPrice]:
     global _prices
     if _prices is None:
-        _prices = {**DEFAULT_PRICING_MODELS, **decode_snapshot(json.loads(BUNDLE_PATH.read_text()))}
+        _prices = dict(DEFAULT_PRICING_MODELS)
+        _price_sources.clear()
+        _price_sources.update({model: "built_in" for model in _prices})
+        bundled = decode_snapshot(json.loads(BUNDLE_PATH.read_text()))
+        _prices.update(bundled)
+        _price_sources.update({model: "bundled_snapshot" for model in bundled})
     return _prices
 
 
-def install_prices(prices: dict[str, ModelPrice]) -> None:
+def get_catalog_price_source(model: str) -> CatalogPriceSource:
+    return _price_sources.get(model, "live_catalog")
+
+
+def install_prices(
+    prices: dict[str, ModelPrice],
+    *,
+    source: CatalogPriceSource = "live_catalog",
+    source_by_model: Mapping[str, CatalogPriceSource] | None = None,
+) -> None:
     global _prices
     _prices = merge_catalogs(prices, get_active_prices())
+    _price_sources.update({model: source for model in prices})
+    if source_by_model is not None:
+        _price_sources.update(source_by_model)

@@ -576,6 +576,7 @@ async def lifespan(app: FastAPI):
     from app.core.upstream_proxy.cache import get_upstream_route_cache
     from app.modules.proxy.account_cache import get_account_selection_cache, get_routing_availability_cache
     from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
+    from app.modules.settings.model_prices_cache import refresh_model_price_overrides
 
     # The poller MUST be installed before the model scheduler starts: a first
     # leader tick that persists a changed snapshot bumps the model_registry
@@ -603,6 +604,7 @@ async def lifespan(app: FastAPI):
     # streams; the invalidate above already expired it, so a failed refresh
     # degrades to the ordinary TTL reload instead of serving a stale value.
     cache_poller.on_invalidation(NAMESPACE_SETTINGS, get_settings_cache().refresh)
+    cache_poller.on_invalidation(NAMESPACE_SETTINGS, refresh_model_price_overrides)
     cache_poller.on_invalidation(
         NAMESPACE_DASHBOARD_USERS,
         lambda: get_dashboard_users_cache().invalidate(propagate=False),
@@ -670,6 +672,7 @@ async def lifespan(app: FastAPI):
     # instead of the bootstrap floor. Never fails startup.
     await reconcile_model_registry_from_store()
 
+    await refresh_model_price_overrides()
     await cache_poller.start()
 
     async with SessionLocal() as session:

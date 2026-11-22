@@ -523,6 +523,10 @@ class RequestLog(Base):
     cached_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reasoning_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cost_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    cost_input_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cost_cached_input_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cost_output_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_first_token_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -1701,6 +1705,15 @@ class ModelContextWindowOverride(Base):
 
 
 # end M4 model catalogue
+
+
+class ModelPriceOverride(Base):
+    __tablename__ = "model_price_overrides"
+
+    model_id: Mapped[str] = mapped_column(String(256), primary_key=True)
+    input_per_1m: Mapped[float] = mapped_column(Float, nullable=False)
+    cached_input_per_1m: Mapped[float] = mapped_column(Float, nullable=False)
+    output_per_1m: Mapped[float] = mapped_column(Float, nullable=False)
 
 
 class RuntimeSentinel(Base):

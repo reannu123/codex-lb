@@ -5,6 +5,7 @@ import {
   DashboardSettingsSchema,
   ModelContextWindowOverrideUpsertRequestSchema,
   ModelContextWindowOverridesSchema,
+  ModelPricesSchema,
   SettingsUpdateRequestSchema,
   TelemetryConsentSchema,
   TelemetryConsentUpdateRequestSchema,
@@ -98,4 +99,18 @@ export function putModelContextWindowOverride(slug: string, payload: unknown) {
 
 export function deleteModelContextWindowOverride(slug: string) {
   return del(`${MODEL_CONTEXT_WINDOW_OVERRIDES_PATH}/${encodeURIComponent(slug)}`, ModelContextWindowOverridesSchema);
+}
+
+const MODEL_PRICES_PATH = `${SETTINGS_PATH}/model-prices`;
+
+export function getModelPrices() {
+  return get(MODEL_PRICES_PATH, ModelPricesSchema);
+}
+
+export function saveModelPrice(modelId: string, rates: { inputPer1M: string; cachedInputPer1M: string; outputPer1M: string }) {
+  return put(`${MODEL_PRICES_PATH}/${encodeURIComponent(modelId)}`, ModelPricesSchema, { body: rates });
+}
+
+export function clearModelPrice(modelId: string) {
+  return del(`${MODEL_PRICES_PATH}/${encodeURIComponent(modelId)}`, ModelPricesSchema);
 }

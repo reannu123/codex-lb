@@ -173,6 +173,12 @@ from app.core.runtime_logging import log_error_response
 from app.core.socket_peer import raw_socket_peer_host
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
+from app.core.usage.price_overrides import (
+    PricingView,
+    bind_pricing_view,
+    current_pricing_view,
+    reset_pricing_view,
+)
 from app.core.utils.json_guards import is_json_list, is_json_mapping
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.shared_future import (
@@ -1521,40 +1527,65 @@ async def internal_bridge_responses(
         forwarded_headers = {
             key: value for key, value in forwarded_headers.items() if key.lower() != "x-codex-turn-state"
         }
-    return await _stream_responses(
-        request,
-        payload,
-        context,
-        api_key,
-        codex_session_affinity=forwarded_request_context.context.codex_session_affinity,
-        openai_cache_affinity=True,
-        prefer_http_bridge=True,
-        api_key_policy_already_applied=True,
-        skip_limit_enforcement=skip_limit_enforcement,
-        api_key_reservation_override=forwarded_request_context.context.reservation,
-        include_rate_limit_headers=False,
-        forwarded_request=True,
-        forwarded_original_request_unanchored=forwarded_request_context.context.original_request_unanchored,
-        forwarded_legacy_signature=forwarded_request_context.context.signature_version is None,
-        forwarded_headers=forwarded_headers,
-        forwarded_downstream_turn_state=forwarded_request_context.context.downstream_turn_state,
-        forwarded_affinity_kind=forwarded_request_context.context.original_affinity_kind,
-        forwarded_affinity_key=forwarded_request_context.context.original_affinity_key,
-        forwarded_file_owner_account_id=forwarded_request_context.context.file_owner_account_id,
-        forwarded_client_ip=forwarded_request_context.context.client_ip,
-        # The OpenAI-SDK contract rewrites (drop ``codex.*``, backfill terminal
-        # output, synthesize ``response.created``) MUST be applied by the
-        # origin instance — the one that actually responds to the client — so
-        # they can honour the original route's ``enforce_openai_sdk_contract``
-        # decision. This handler runs on the owner instance after the origin
-        # forwarded the request via the internal bridge; if we re-applied them
-        # here, a forwarded ``/backend-api/codex/responses`` request would
-        # lose ``codex.*`` events (and gain a synthetic ``response.created``)
-        # before the origin ever sees the stream. Forward verbatim and let
-        # the origin run its own normalization.
-        enforce_openai_sdk_contract=False,
-        prohibit_fast_mode=await _prohibit_fast_mode_enabled(),
-    )
+    quote = forwarded_request_context.context.price_quote
+    if quote is None:
+        pricing_view = current_pricing_view()
+    else:
+        local = current_pricing_view()
+        pricing_view = PricingView(local.upstream, local.overrides, quote)
+    pricing_token = bind_pricing_view(pricing_view)
+    try:
+        response = await _stream_responses(
+            request,
+            payload,
+            context,
+            api_key,
+            codex_session_affinity=forwarded_request_context.context.codex_session_affinity,
+            openai_cache_affinity=True,
+            prefer_http_bridge=True,
+            api_key_policy_already_applied=True,
+            skip_limit_enforcement=skip_limit_enforcement,
+            api_key_reservation_override=forwarded_request_context.context.reservation,
+            include_rate_limit_headers=False,
+            forwarded_request=True,
+            forwarded_original_request_unanchored=forwarded_request_context.context.original_request_unanchored,
+            forwarded_legacy_signature=forwarded_request_context.context.signature_version is None,
+            forwarded_headers=forwarded_headers,
+            forwarded_downstream_turn_state=forwarded_request_context.context.downstream_turn_state,
+            forwarded_affinity_kind=forwarded_request_context.context.original_affinity_kind,
+            forwarded_affinity_key=forwarded_request_context.context.original_affinity_key,
+            forwarded_file_owner_account_id=forwarded_request_context.context.file_owner_account_id,
+            forwarded_client_ip=forwarded_request_context.context.client_ip,
+            # The OpenAI-SDK contract rewrites (drop ``codex.*``, backfill terminal
+            # output, synthesize ``response.created``) MUST be applied by the
+            # origin instance — the one that actually responds to the client — so
+            # they can honour the original route's ``enforce_openai_sdk_contract``
+            # decision. This handler runs on the owner instance after the origin
+            # forwarded the request via the internal bridge; if we re-applied them
+            # here, a forwarded ``/backend-api/codex/responses`` request would
+            # lose ``codex.*`` events (and gain a synthetic ``response.created``)
+            # before the origin ever sees the stream. Forward verbatim and let
+            # the origin run its own normalization.
+            enforce_openai_sdk_contract=False,
+            prohibit_fast_mode=await _prohibit_fast_mode_enabled(),
+        )
+    finally:
+        reset_pricing_view(pricing_token)
+    if quote is not None and isinstance(response, StreamingResponse):
+        stream = response.body_iterator
+
+        async def stream_with_pricing() -> AsyncIterator[str | bytes | memoryview]:
+            # The body runs after the endpoint returns; its tasks and bridge
+            # request state must inherit the origin's price.
+            token = bind_pricing_view(pricing_view)
+            try:
+                async for event in stream:
+                    yield event
+            finally:
+                reset_pricing_view(token)
+
+        response.body_iterator = stream_with_pricing()
+    return response
 
 
 async def _proxy_realtime_live_websocket_route(
