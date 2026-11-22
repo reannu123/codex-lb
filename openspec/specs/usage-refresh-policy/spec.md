@@ -437,7 +437,7 @@ This credit-aware interpretation MUST be shared by proxy account selection and a
 
 ### Requirement: Eligibility for reset-confirmed limit warm-up
 
-The system SHALL support an optional limit warm-up mechanism that is disabled by default. When enabled globally and for an account, background usage refresh MAY send one minimal upstream Responses request after it confirms that a selected quota window moved into a newly available reset window. Eligibility SHALL require a real reset transition, sufficient post-reset availability, and a pre-reset sample for the same selected quota window with `used_percent` at or above `limit_warmup_exhausted_threshold_percent` (dashboard “Min usage %”, default 99.0). The minimum SHALL apply to reset-confirmed warm-up only, including when the selected window resolves to a Free monthly window. Blocked-account recovery MUST evaluate reset evidence independently of this minimum.
+The system SHALL support an optional limit warm-up mechanism that is disabled by default. When enabled globally and for an account, background usage refresh MAY send one minimal upstream Responses request after it confirms that a selected quota window moved into a newly available reset window. Eligibility SHALL require a real reset transition, sufficient post-reset availability, and a pre-reset sample for the same selected quota window with a finite `used_percent` at or above `limit_warmup_exhausted_threshold_percent` (dashboard “Min usage %”, default 99.0). The minimum SHALL apply to reset-confirmed warm-up only, including when the selected window resolves to a Free monthly window. Blocked-account recovery MUST evaluate reset evidence independently of this minimum.
 
 Background usage refresh MUST complete any applicable blocked-status reconciliation before warm-up evaluation. Candidate evaluation and the sender's fresh preflight check MUST both require the account to be `active`; paused, deactivated, `reauth_required`, `rate_limited`, and `quota_exceeded` accounts MUST NOT receive warm-up traffic. When a reset-confirmed recovery uses persisted transition evidence, warm-up SHALL reuse that same before/after pair so the new account/window/reset tuple enters the ordinary durable deduplication path.
 
@@ -453,6 +453,12 @@ The configured `limit_warmup_cooldown_seconds` SHALL gate only staggered idle wa
 - **GIVEN** limit warm-up is enabled globally and for an active account
 - **AND** a selected window's pre-reset usage is below the configured minimum
 - **WHEN** background usage refresh confirms a reset and the new sample meets the configured availability gate
+- **THEN** the system MUST NOT claim an attempt or send a reset-confirmed warm-up for that account/window/reset tuple
+
+#### Scenario: Non-finite pre-reset usage does not qualify
+- **GIVEN** limit warm-up is enabled globally and for an active account
+- **AND** the selected window's pre-reset sample reports a non-finite usage percentage
+- **WHEN** background usage refresh records an available sample after the previous reset deadline and confirms a reset
 - **THEN** the system MUST NOT claim an attempt or send a reset-confirmed warm-up for that account/window/reset tuple
 
 #### Scenario: Monthly recovery proceeds below the warm-up minimum

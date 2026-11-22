@@ -726,6 +726,39 @@ async def test_reset_warmup_uses_configured_pre_reset_minimum(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("pre_reset_usage", [float("nan"), float("inf"), float("-inf")])
+async def test_scheduled_reset_skips_nonfinite_pre_reset_usage(pre_reset_usage: float) -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+    before = _usage(
+        account.id,
+        used_percent=pre_reset_usage,
+        reset_at=1000,
+        recorded_at=datetime.fromtimestamp(900, tz=timezone.utc).replace(tzinfo=None),
+    )
+    after = _usage(
+        account.id,
+        used_percent=0,
+        reset_at=19_000,
+        recorded_at=datetime.fromtimestamp(1100, tz=timezone.utc).replace(tzinfo=None),
+    )
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(),
+        before_primary={account.id: before},
+        before_secondary={},
+        after_primary={account.id: after},
+        after_secondary={},
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
+
+
+@pytest.mark.asyncio
 async def test_early_reset_reanchor_uses_sampling_interval() -> None:
     repo = FakeWarmupRepo()
     sender = FakeSender()

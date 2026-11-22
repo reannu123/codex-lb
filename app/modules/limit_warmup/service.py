@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 import uuid
 from dataclasses import dataclass
@@ -878,7 +879,7 @@ def _build_candidate(
     )
     if before is None or after is None:
         return None
-    if before.used_percent < min_pre_reset_usage_percent:
+    if not math.isfinite(before.used_percent) or before.used_percent < min_pre_reset_usage_percent:
         return None
     available_percent = 100.0 - after.used_percent
     if min_available_percent < 100.0 and available_percent < min_available_percent:
