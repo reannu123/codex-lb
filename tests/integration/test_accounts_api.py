@@ -77,11 +77,18 @@ async def test_import_and_list_accounts(async_client):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("offset_seconds", "sample_age_minutes", "expected"),
-    [(-31, 23, False), (-30, 23, True), (30, 23, True), (31, 23, False), (0, 360, True)],
+    ("offset_seconds", "sample_age_minutes", "status", "used_percent", "expected"),
+    [
+        (-31, 23, AccountStatus.PAUSED, 0, False),
+        (-30, 23, AccountStatus.PAUSED, 0, True),
+        (30, 23, AccountStatus.PAUSED, 0, True),
+        (31, 23, AccountStatus.PAUSED, 0, False),
+        (0, 360, AccountStatus.PAUSED, 0, True),
+        pytest.param(-10, 23, AccountStatus.ACTIVE, 25, False, id="consumption-inside-tolerance"),
+    ],
 )
 async def test_account_list_reports_latest_primary_observation(
-    async_client, offset_seconds, sample_age_minutes, expected
+    async_client, offset_seconds, sample_age_minutes, status, used_percent, expected
 ):
     account_id = "quota-observation"
     encryptor = TokenEncryptor()
@@ -100,7 +107,7 @@ async def test_account_list_reports_latest_primary_observation(
                 refresh_token_encrypted=encryptor.encrypt("refresh"),
                 id_token_encrypted=encryptor.encrypt("id"),
                 last_refresh=now,
-                status=AccountStatus.PAUSED,
+                status=status,
             )
         )
         await session.flush()
@@ -118,7 +125,7 @@ async def test_account_list_reports_latest_primary_observation(
                     account_id=account_id,
                     window="primary",
                     recorded_at=observed,
-                    used_percent=0,
+                    used_percent=used_percent,
                     reset_at=naive_utc_to_epoch(reset),
                     window_minutes=300,
                 ),
@@ -137,12 +144,12 @@ async def test_account_list_reports_latest_primary_observation(
     response = await async_client.get("/api/accounts")
     assert response.status_code == 200
     account = next(account for account in response.json()["accounts"] if account["accountId"] == account_id)
-    assert account["status"] == "paused"
+    assert account["status"] == status.value
     assert account["primaryWindowNotStarted"] is expected
     assert account["recordedAtPrimary"] == f"{observed.isoformat()}Z"
     assert account["recordedAtSecondary"] == f"{previous.isoformat()}Z"
     assert account["resetAtPrimary"] == (f"{reset.isoformat()}Z" if reset > now else None)
-    assert account["usage"]["primaryRemainingPercent"] == (100.0 if reset > now else None)
+    assert account["usage"]["primaryRemainingPercent"] == (100.0 - used_percent if reset > now else None)
 
 
 @pytest.mark.asyncio

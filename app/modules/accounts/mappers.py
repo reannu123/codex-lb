@@ -283,6 +283,7 @@ def _account_to_summary(
         recorded_at_secondary=effective_secondary_usage.recorded_at if effective_secondary_usage is not None else None,
         recorded_at_monthly=monthly_usage.recorded_at if monthly_usage is not None else None,
         primary_window_not_started=effective_primary_usage is not None
+        and effective_primary_usage.used_percent == 0
         and reset_slides_with_observation(
             reset_at=effective_primary_usage.reset_at,
             recorded_at=effective_primary_usage.recorded_at,
