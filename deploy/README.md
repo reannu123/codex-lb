@@ -7,7 +7,7 @@ change to production.
 | Piece | Where |
 |---|---|
 | Stack definition | `deploy/portainer/compose.yaml` on the **`deploy/production`** branch |
-| Promotion PRs | opened by the `promote-production` job of [Fork image](../.github/workflows/fork-image.yml) ([policy](../.github/FORK_POLICY.md#image-publishing)) |
+| Promotion PRs | prepared by the `promote-production` job of [Fork image](../.github/workflows/fork-image.yml) ([policy](../.github/FORK_POLICY.md#image-publishing)): it pushes `promote/production-<sha12>` and the run summary links a prefilled PR you open |
 | Backup / restore / rehearsal | [`backup.sh`](backup.sh), [`restore.sh`](restore.sh), [`rehearse-migration.sh`](rehearse-migration.sh) |
 | Data | `/docker/appdata/codex-lb` (`store.db`, `encryption.key`) |
 | Backups | `/docker/backups/codex-lb/<label>-<UTC timestamp>/` (`SHA256SUMS`, `manifest.json`) |
@@ -53,7 +53,8 @@ from `/docker/compose/switchboard`.
 
 ## Deploy
 
-1. **Review the promotion PR** (`chore(deploy): promote <sha12> to production`). Its only
+1. **Open and review the promotion PR.** In the Fork image run summary, click *Create the
+   promotion pull request* (`chore(deploy): promote <sha12> to production`). Its only
    change is the digest. Read the compare link in the body.
 2. **Rehearse the migration** against the newest backup (take one first if it is stale;
    the backup stops the app for about a minute):

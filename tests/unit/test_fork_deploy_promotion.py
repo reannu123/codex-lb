@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
+import urllib.parse
 from pathlib import Path
 from types import ModuleType
 
@@ -150,8 +152,86 @@ def test_workflow_job_only_proposes() -> None:
     workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "fork-image.yml").read_text())
     job = workflow["jobs"]["promote-production"]
     assert job["needs"] == ["resolve", "publish"]
-    assert job["permissions"] == {"contents": "write", "pull-requests": "write"}
+    # Lists open PRs only; a person opens the promotion PR.
+    assert job["permissions"] == {"contents": "write", "pull-requests": "read"}
     assert workflow["jobs"]["publish"]["outputs"]["digest"] == "${{ steps.push.outputs.digest }}"
     text = yaml.safe_dump(job) + (ROOT / "deploy" / "promote-production.py").read_text()
     assert '"merge"' not in text and "--auto" not in text
+    assert '"create"' not in text and "pr create" not in text
     assert "refs/heads/deploy/production" not in text.split("def push_new_branch")[1]
+
+
+@pytest.fixture
+def run_main(repo: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Run main() promoting c3/D2 with a fake read-only ``gh`` listing ``open_prs``."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    prs = tmp_path / "prs.json"
+    prs.write_text("[]")
+    gh = bin_dir / "gh"
+    gh.write_text(f'#!/bin/sh\ncase "$1 $2" in "pr list") cat {prs};; *) exit 9;; esac\n')
+    gh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setenv("SOURCE_SHA", repo["c3"])
+    monkeypatch.setenv("IMAGE_DIGEST", D2)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setattr(promote, "image_revision", labels(repo))
+
+    def run(open_prs: str = "[]") -> None:
+        prs.write_text(open_prs)
+        promote.main()
+
+    return run
+
+
+def branch_tip(name: str) -> str:
+    out = git("ls-remote", "origin", f"refs/heads/{name}").split()
+    return out[0] if out else ""
+
+
+def test_main_pushes_the_branch_and_links_a_prefilled_pr(
+    repo: dict[str, str], run_main, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run_main()
+    branch = f"promote/production-{repo['c3'][:12]}"
+    assert branch_tip(branch)
+    assert branch_tip("deploy/production") == repo["base"]
+    out = capsys.readouterr().out
+    link = out.split("](", 1)[1].split(")", 1)[0]
+    assert link.startswith(f"https://github.com/owner/repo/compare/deploy/production...{urllib.parse.quote(branch)}?")
+    query = urllib.parse.parse_qs(link.split("?", 1)[1])
+    assert query["quick_pull"] == ["1"]
+    assert query["title"] == [f"chore(deploy): promote {repo['c3'][:12]} to production"]
+    assert repo["c1"] in query["body"][0] and D2 in query["body"][0]
+
+
+def test_main_rerun_reuses_a_matching_branch(repo: dict[str, str], run_main, capsys) -> None:
+    run_main()
+    branch = f"promote/production-{repo['c3'][:12]}"
+    first = branch_tip(branch)
+    run_main()
+    assert branch_tip(branch) == first  # never updated
+    assert capsys.readouterr().out.count("Create the promotion pull request") == 2
+
+
+def test_main_refuses_a_stale_branch(repo: dict[str, str], run_main) -> None:
+    run_main()
+    git("switch", "-q", "deploy/production")
+    (Path.cwd() / "README.md").write_text("changed\n")
+    git("commit", "-qam", "moved")
+    git("push", "-q", "origin", "deploy/production")
+    with pytest.raises(SystemExit, match="no longer matches"):
+        run_main()
+
+
+def test_main_is_a_no_op_while_the_pr_is_open(repo: dict[str, str], run_main, capsys) -> None:
+    branch = f"promote/production-{repo['c3'][:12]}"
+    run_main(f'[{{"number": 5, "headRefName": "{branch}"}}]')
+    assert "already open" in capsys.readouterr().out
+    assert not branch_tip(branch)
+
+
+def test_main_lists_superseded_promotion_prs(repo: dict[str, str], run_main, capsys) -> None:
+    run_main('[{"number": 7, "headRefName": "promote/production-0123456789ab"}]')
+    link = capsys.readouterr().out.split("](", 1)[1].split(")", 1)[0]
+    assert "Supersedes open promotion PRs: #7" in urllib.parse.parse_qs(link.split("?", 1)[1])["body"][0]

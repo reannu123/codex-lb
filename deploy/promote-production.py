@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Open a pull request that bumps the production image digest on deploy/production.
+"""Prepare a pull request that bumps the production image digest on deploy/production.
 
 Runs in the "Fork image" workflow after a verified publish (stdlib only). It
 never merges and never pushes to deploy/production: it pushes a NEW branch
 ``promote/production-<sha12>`` whose only change is the digest on the image
-line of deploy/portainer/compose.yaml, and opens a PR into deploy/production.
+line of deploy/portainer/compose.yaml, and prints a prefilled one-click link
+for a person to open the PR into deploy/production. GitHub Actions is not
+allowed to create pull requests in this repository, and does not need to be.
+A rerun reuses the branch only while it still holds exactly the planned change.
 
 The deployed commit is read from the ``org.opencontainers.image.revision``
 label of the image currently pinned on deploy/production. The new image's
@@ -21,6 +24,7 @@ import os
 import re
 import subprocess
 import tempfile
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -169,7 +173,7 @@ def gh(*args: str) -> str:
 def body(p: Plan, source: str, digest: str, repo: str, superseded: list[str]) -> str:
     lines = [
         "Bumps the production image digest. The only change is the `image:` line of",
-        f"`{COMPOSE}`. Opened by the Fork image workflow; never auto-merged.",
+        f"`{COMPOSE}`. Prepared by the Fork image workflow; never auto-merged.",
         "",
         "| | Commit | Digest |",
         "|---|---|---|",
@@ -190,13 +194,32 @@ def body(p: Plan, source: str, digest: str, repo: str, superseded: list[str]) ->
     return "\n".join(lines) + "\n"
 
 
+def remote_branch(branch: str) -> str | None:
+    out = git("ls-remote", "--heads", "origin", f"refs/heads/{branch}").decode().split()
+    return out[0] if out else None
+
+
+def same_change(branch: str, planned: str) -> bool:
+    """True when ``branch`` holds the planned parent and tree (commit SHAs differ by timestamp)."""
+    existing = fetch(f"refs/heads/{branch}", "refs/promotion/existing")
+    parents = git("rev-list", "--parents", "-n", "1", existing).decode().split()[1:]
+    planned_parents = git("rev-list", "--parents", "-n", "1", planned).decode().split()[1:]
+    tree = git("rev-parse", f"{existing}^{{tree}}").decode().strip()
+    return parents == planned_parents and tree == git("rev-parse", f"{planned}^{{tree}}").decode().strip()
+
+
+def pull_request_link(repo: str, branch: str, title: str, text: str) -> str:
+    query = urllib.parse.urlencode({"quick_pull": "1", "title": title, "body": text})
+    return f"https://github.com/{repo}/compare/{PRODUCTION}...{urllib.parse.quote(branch)}?{query}"
+
+
 def main() -> None:
     source = os.environ["SOURCE_SHA"]
     digest = os.environ["IMAGE_DIGEST"]
     repo = os.environ["GITHUB_REPOSITORY"]
     base = fetch(f"refs/heads/{PRODUCTION}", "refs/promotion/production")
     main_tip = fetch("refs/heads/main", "refs/promotion/main")
-    p = plan(source, digest, base, main_tip)
+    p = plan(source, digest, base, main_tip, image_revision)
     if p is None:
         print(f"{PRODUCTION} already pins {digest}; nothing to promote.")
         return
@@ -209,25 +232,24 @@ def main() -> None:
         print(f"A promotion PR from {branch} is already open.")
         return
     superseded = [f"#{pr['number']}" for pr in open_prs if pr["headRefName"].startswith(BRANCH_PREFIX)]
-    require(
-        not git("ls-remote", "--heads", "origin", f"refs/heads/{branch}").strip(),
-        f"{branch} exists without an open PR; open it by hand: https://github.com/{repo}/compare/{PRODUCTION}...{branch}",
-    )
 
-    push_new_branch(commit(p, source, digest), branch)
-    try:
-        url = gh(
-            "pr", "create", "--repo", repo, "--base", PRODUCTION, "--head", branch,
-            "--title", f"chore(deploy): promote {source[:12]} to production",
-            "--body", body(p, source, digest, repo, superseded),
-        )  # fmt: skip
-    except subprocess.CalledProcessError as error:
-        raise PromotionError(
-            f"pushed {branch} but could not open the PR ({error.stderr.strip()}). If GitHub Actions may not "
-            "create pull requests, enable it under Settings > Actions > General, or open it by hand: "
-            f"https://github.com/{repo}/compare/{PRODUCTION}...{branch}"
-        ) from error
-    print(f"Opened {url}: {p.deployed_source[:12]} -> {source[:12]} ({digest})")
+    planned = commit(p, source, digest)
+    if remote_branch(branch) is None:
+        push_new_branch(planned, branch)
+    else:
+        require(
+            same_change(branch, planned),
+            f"{branch} exists but no longer matches {PRODUCTION}; delete the branch and rerun this job",
+        )
+
+    title = f"chore(deploy): promote {source[:12]} to production"
+    link = pull_request_link(repo, branch, title, body(p, source, digest, repo, superseded))
+    # The PR is opened by a person (GitHub Actions may not create pull requests here).
+    print("### Production promotion ready")
+    print()
+    print(f"`{p.deployed_source[:12]}` -> `{source[:12]}` (`{digest}`) on branch `{branch}`.")
+    print()
+    print(f"**[Create the promotion pull request]({link})** (prefilled; review, then create).")
 
 
 if __name__ == "__main__":

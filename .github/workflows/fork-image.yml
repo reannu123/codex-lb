@@ -7,8 +7,8 @@ name: Fork image
 # only then pushes. Tags: immutable `sha-<full sha>` (never overwritten; a
 # rerun reuses the first published digest) and moving `fork-main` (promoted
 # only while the commit is still main's tip). Never `latest` or release tags.
-# After publishing it opens (never merges) a PR bumping the production digest
-# on deploy/production.
+# After publishing it pushes a promotion branch bumping the production digest
+# and links a prefilled PR into deploy/production for the owner to open.
 on:
   workflow_run:
     workflows: ["Fork CI"]
@@ -210,13 +210,15 @@ jobs:
             echo "- digest: \`${DIGEST}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Proposes, never deploys: opens a PR into deploy/production that changes only
-  # the image digest (deploy/promote-production.py). Never merges, never pushes
-  # to deploy/production, and refuses unless the published commit descends from
-  # the commit of the currently pinned image. Deploying stays a manual,
-  # owner-approved step (deploy/README.md).
+  # Proposes, never deploys: pushes a promote/production-<sha12> branch whose
+  # only change is the image digest and prints a prefilled one-click PR link
+  # into deploy/production (deploy/promote-production.py). A person opens the
+  # PR: GitHub Actions is not allowed to create pull requests here. Never
+  # merges, never pushes to deploy/production, and refuses unless the published
+  # commit descends from the commit of the currently pinned image. Deploying
+  # stays a manual, owner-approved step (deploy/README.md).
   promote-production:
-    name: Open the production promotion PR
+    name: Prepare the production promotion
     needs: [resolve, publish]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -225,7 +227,7 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: write
-      pull-requests: write
+      pull-requests: read
     steps:
       - name: Check out the tested commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -233,7 +235,7 @@ jobs:
           ref: ${{ needs.resolve.outputs.sha }}
           fetch-depth: 0
 
-      - name: Open the promotion PR
+      - name: Push the promotion branch and link its PR
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SOURCE_SHA: ${{ needs.resolve.outputs.sha }}
