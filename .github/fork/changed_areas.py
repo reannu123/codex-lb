@@ -25,6 +25,10 @@ AREAS: dict[str, list[str]] = {
         "tests/**",
         "config/**",
         "scripts/**",
+        # Fork deploy tooling; its tests live in tests/unit/test_fork_deploy_*.py.
+        "deploy/*.sh",
+        "deploy/*.py",
+        "deploy/portainer/**",
         "pyproject.toml",
         "uv.lock",
         "docs/reference/settings.md",
