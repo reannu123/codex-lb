@@ -15,9 +15,10 @@ services:
     restart: unless-stopped
     stop_grace_period: 45s
     ports:
-      - "100.105.49.87:2455:2455"
-      # Nginx Proxy Manager (codex-lb.home, codex-lb.reannu.dev) proxies to the LAN address.
-      - "192.168.0.125:2455:2455"
+      # All interfaces: the LAN address Nginx Proxy Manager (codex-lb.home,
+      # codex-lb.reannu.dev) proxies to, and Tailscale. Binding no specific IP
+      # keeps the container starting if either address changes or is not up yet.
+      - "2455:2455"
     volumes:
       - /docker/appdata/codex-lb:/var/lib/codex-lb:Z
     healthcheck:
