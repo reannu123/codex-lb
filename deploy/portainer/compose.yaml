@@ -16,6 +16,8 @@ services:
     stop_grace_period: 45s
     ports:
       - "100.105.49.87:2455:2455"
+      # Nginx Proxy Manager (codex-lb.home, codex-lb.reannu.dev) proxies to the LAN address.
+      - "192.168.0.125:2455:2455"
     volumes:
       - /docker/appdata/codex-lb:/var/lib/codex-lb:Z
     healthcheck:
