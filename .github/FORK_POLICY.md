@@ -56,9 +56,11 @@ only if the commit is still the tip at promotion time. It never pushes `latest` 
 tags. Deploying an image is a separate step that needs the owner's direct approval.
 
 After a publish, the same workflow's `promote-production` job runs
-[`deploy/promote-production.py`](../deploy/promote-production.py). It opens a pull request
+[`deploy/promote-production.py`](../deploy/promote-production.py). It prepares a pull request
 into `deploy/production`, the branch Portainer deploys with GitOps updates off, that changes
-only the image digest. It reads the deployed commit from the
+only the image digest: it pushes the branch and puts a prefilled one-click "Create pull
+request" link in the run summary. The owner opens the PR, as GitHub Actions is not allowed
+to create pull requests in this repository. It reads the deployed commit from the
 `org.opencontainers.image.revision` label of the currently pinned image and refuses unless
 the new image's label is the published commit and that commit is on `main` and descends from
 the deployed one. It pushes only a new `promote/production-<sha12>` branch, never
