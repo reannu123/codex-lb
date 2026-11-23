@@ -7,6 +7,8 @@ name: Fork image
 # only then pushes. Tags: immutable `sha-<full sha>` (never overwritten; a
 # rerun reuses the first published digest) and moving `fork-main` (promoted
 # only while the commit is still main's tip). Never `latest` or release tags.
+# After publishing it opens (never merges) a PR bumping the production digest
+# on deploy/production.
 on:
   workflow_run:
     workflows: ["Fork CI"]
@@ -82,6 +84,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
     env:
       SHA: ${{ needs.resolve.outputs.sha }}
     steps:
@@ -205,3 +209,39 @@ jobs:
             echo "- \`${IMAGE}:fork-main\` promoted: ${PROMOTED}"
             echo "- digest: \`${DIGEST}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Proposes, never deploys: opens a PR into deploy/production that changes only
+  # the image digest (deploy/promote-production.py). Never merges, never pushes
+  # to deploy/production, and refuses unless the published commit descends from
+  # the commit of the currently pinned image. Deploying stays a manual,
+  # owner-approved step (deploy/README.md).
+  promote-production:
+    name: Open the production promotion PR
+    needs: [resolve, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: fork-production-promotion
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out the tested commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Open the promotion PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ needs.resolve.outputs.sha }}
+          IMAGE_DIGEST: ${{ needs.publish.outputs.digest }}
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          set -o pipefail
+          python3 deploy/promote-production.py | tee -a "$GITHUB_STEP_SUMMARY"
