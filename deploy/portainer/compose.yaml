@@ -10,7 +10,7 @@
 # live here; the app reads store.db and encryption.key from the bind mount.
 services:
   codex-lb:
-    image: ghcr.io/reannu123/codex-lb@sha256:9f7464beafd0234f3e43bb1d5192917b3a378f24853f66bab7a2e4fe24100285
+    image: ghcr.io/reannu123/codex-lb@sha256:6bc1a1ed319ed97f41b9d5aee64de6a18169385efb414d48165cbe16156cbecc
     container_name: codex-lb
     restart: unless-stopped
     stop_grace_period: 45s
