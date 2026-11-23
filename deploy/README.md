@@ -81,7 +81,7 @@ from `/docker/compose/switchboard`.
    ```sh
    docker inspect -f '{{.Config.Image}} {{.State.Health.Status}}' codex-lb   # new digest, healthy
    curl -fsS http://100.105.49.87:2455/health/ready                          # "status":"ok"
-   curl -fsS http://codex-lb.home/health/ready     # via Nginx Proxy Manager -> 192.168.0.125:2455
+   curl -fsS http://codex-lb.home/health/ready     # via Nginx Proxy Manager -> pm-docker LAN :2455
    docker exec codex-lb python -m app.db.migrate current                     # revision from step 2
    docker logs --since 15m codex-lb 2>&1 | grep -iE 'error|traceback'        # expect nothing new
    ```

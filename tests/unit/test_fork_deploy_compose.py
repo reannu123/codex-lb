@@ -28,8 +28,10 @@ def test_matches_the_hand_managed_production_service() -> None:
     assert service["container_name"] == "codex-lb"
     assert service["restart"] == "unless-stopped"
     assert service["stop_grace_period"] == "45s"
-    # Tailscale, plus the LAN address Nginx Proxy Manager forwards codex-lb.home to.
-    assert service["ports"] == ["100.105.49.87:2455:2455", "192.168.0.125:2455:2455"]
+    # All interfaces, no host IP: Nginx Proxy Manager forwards codex-lb.home to the
+    # LAN address, operators use Tailscale, and neither address change can stop
+    # the container from starting.
+    assert service["ports"] == ["2455:2455"]
     assert service["volumes"] == ["/docker/appdata/codex-lb:/var/lib/codex-lb:Z"]
     assert "/health/ready" in " ".join(service["healthcheck"]["test"])
     # Nothing sensitive or host-specific is injected through the file.
