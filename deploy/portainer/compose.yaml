@@ -1,0 +1,26 @@
+# Production stack for Switchboard (codex-lb) on pm-docker, deployed by
+# Portainer from the deploy/production branch (GitOps updates off). See
+# deploy/README.md on main for the runbook.
+#
+# Derived from the hand-managed /docker/compose/codex-lb/compose.yaml. Only one
+# stack may ever mount /docker/appdata/codex-lb: the fixed container_name makes
+# a second copy fail to start instead of opening the same SQLite store.
+#
+# The image line is the only line promotion pull requests change. No secrets
+# live here; the app reads store.db and encryption.key from the bind mount.
+services:
+  codex-lb:
+    image: ghcr.io/reannu123/codex-lb@sha256:9f7464beafd0234f3e43bb1d5192917b3a378f24853f66bab7a2e4fe24100285
+    container_name: codex-lb
+    restart: unless-stopped
+    stop_grace_period: 45s
+    ports:
+      - "100.105.49.87:2455:2455"
+    volumes:
+      - /docker/appdata/codex-lb:/var/lib/codex-lb:Z
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:2455/health/ready', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
